@@ -2,49 +2,74 @@
 #
 # Fairness A/B Test Orchestrator
 #
-# Runs baseline (no fairness) and program-aware (EWMA fairness) load tests,
-# then analyzes the comparison.
+# Reads a scenario YAML and runs an A/B test:
+#   1. Optionally deploys a kind cluster
+#   2. Tunes the vllm-sim deployment
+#   3. For each phase: switches EPP config, runs loadgen, snapshots metrics
+#   4. Runs analysis across all phases
 #
 # Prerequisites:
-#   - vLLM + EPP already deployed (via make env-dev-kubernetes or similar)
-#   - kubectl port-forward to gateway on $GATEWAY_PORT (default 8080)
-#   - kubectl port-forward to EPP metrics on $METRICS_PORT (default 9090)
-#   - Python 3.9+ with aiohttp, numpy, matplotlib
+#   - Python 3.9+ with aiohttp, numpy, matplotlib, pyyaml
+#   - kubectl, kind (if infra.kind=true)
 #
 # Usage:
-#   ./run_test.sh                     # Use defaults
-#   GATEWAY_URL=http://10.0.0.5:8080 DURATION=300 ./run_test.sh
+#   ./run_test.sh                                          # default scenario
+#   SCENARIO=scenarios/uniform-fairness.yaml ./run_test.sh # custom scenario
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-# --- Configuration (override via environment) ---
-GATEWAY_URL="${GATEWAY_URL:-http://localhost:8080}"
-METRICS_URL="${METRICS_URL:-http://localhost:9090}"
-MODEL="${MODEL:-Qwen/Qwen2-0.5B-Instruct}"
-PROGRAMS="${PROGRAMS:-prog-heavy:10,prog-medium:3,prog-light:1}"
-DURATION="${DURATION:-180}"
-WARMUP="${WARMUP:-30}"
-MAX_TOKENS="${MAX_TOKENS:-100}"
-TIMEOUT="${TIMEOUT:-60}"
-CONCURRENCY="${CONCURRENCY:-50}"
-NAMESPACE="${NAMESPACE:-fairness-test}"
+# --- Configuration ---
+SCENARIO="${SCENARIO:-scenarios/stress-h100.yaml}"
 
-# EPP deployment name — derived from model name.
+# --- YAML Parsing Helper ---
+# Extracts a value from the scenario YAML via Python.
+yaml_get() {
+    python3 -c "
+import yaml, sys
+with open('$SCRIPT_DIR/$SCENARIO') as f:
+    cfg = yaml.safe_load(f)
+# Navigate dotted path
+val = cfg
+for key in '$1'.split('.'):
+    if val is None:
+        val = None
+        break
+    if isinstance(val, list):
+        val = val[int(key)]
+    else:
+        val = val.get(key)
+if val is None:
+    print('${2:-}')
+elif isinstance(val, (list, dict)):
+    import json
+    print(json.dumps(val))
+else:
+    print(val)
+"
+}
+
+# --- Read scenario ---
+MODEL="$(yaml_get model)"
+INFRA_KIND="$(yaml_get infra.kind false)"
+GATEWAY_URL="$(yaml_get infra.gateway_url http://localhost:30080)"
+NAMESPACE="$(yaml_get infra.namespace default)"
+METRICS_URL="${METRICS_URL:-http://localhost:9090}"
+
+# Derive names from model.
 MODEL_SLUG="$(echo "${MODEL##*/}" | tr '[:upper:]' '[:lower:]' | tr ' /_.' '-')"
 EPP_NAME="${EPP_NAME:-${MODEL_SLUG}-endpoint-picker}"
+VLLM_DEPLOY="${MODEL_SLUG}-vllm-sim"
 
-# Configs.
-BASELINE_CONFIG="$REPO_DIR/deploy/config/sim-epp-config.yaml"
-PA_CONFIG="$REPO_DIR/deploy/config/sim-program-aware-config.yaml"
+# If kind, override gateway URL.
+if [ "$INFRA_KIND" = "true" ] || [ "$INFRA_KIND" = "True" ]; then
+    GATEWAY_URL="http://localhost:30080"
+fi
 
 # Output directories.
 RESULTS_DIR="$SCRIPT_DIR/results"
-BASELINE_DIR="$RESULTS_DIR/baseline"
-PA_DIR="$RESULTS_DIR/program-aware"
-COMPARISON_DIR="$RESULTS_DIR/comparison"
 
 # --- Helpers ---
 log() { echo "[$(date +%H:%M:%S)] $*"; }
@@ -52,12 +77,18 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 check_gateway() {
     log "Checking gateway at $GATEWAY_URL ..."
-    if ! curl -sf --max-time 10 "$GATEWAY_URL/v1/completions" \
-        -H 'Content-Type: application/json' \
-        -d "{\"model\":\"$MODEL\",\"prompt\":\"hello\",\"max_tokens\":1,\"temperature\":0}" > /dev/null 2>&1; then
-        die "Gateway not responding at $GATEWAY_URL. Ensure port-forward is active."
-    fi
-    log "Gateway OK."
+    local retries=36
+    for i in $(seq 1 $retries); do
+        if curl -sf --max-time 10 "$GATEWAY_URL/v1/models" > /dev/null 2>&1; then
+            log "Gateway OK."
+            return
+        fi
+        if [ $i -lt $retries ]; then
+            log "Gateway not ready yet, retrying in 5s ($i/$retries) ..."
+            sleep 30
+        fi
+    done
+    die "Gateway not responding at $GATEWAY_URL after $retries attempts. Ensure port-forward is active."
 }
 
 snapshot_metrics() {
@@ -72,9 +103,15 @@ switch_config() {
     local config_name="$2"
     log "Switching EPP config to $config_name ..."
 
+    # Resolve relative path from SCRIPT_DIR.
+    local abs_config="$SCRIPT_DIR/$config_file"
+    if [ ! -f "$abs_config" ]; then
+        die "EPP config not found: $abs_config"
+    fi
+
     # Update ConfigMap.
     kubectl -n "$NAMESPACE" create configmap epp-config \
-        --from-file=epp-config.yaml="$config_file" \
+        --from-file=epp-config.yaml="$abs_config" \
         --dry-run=client -o yaml | kubectl apply -f -
 
     # Restart EPP.
@@ -90,20 +127,90 @@ switch_config() {
     log "Config switched to $config_name."
 }
 
+deploy_kind() {
+    log "Setting up Go modules ..."
+    cd "$REPO_DIR"
+    export GO111MODULE=on
+    export GOPRIVATE=github.com/llm-d/*
+    go mod download
+    go get sigs.k8s.io/gateway-api-inference-extension@08fc9b098204edf50dca24b0b5a98f3a0c600e41
+    go mod tidy
+
+    log "Building EPP image ..."
+    EPP_TAG="${EPP_TAG:-program-aware}" make -C "$REPO_DIR" image-build-epp
+
+    log "Building UDS tokenizer image ..."
+    make -C "$REPO_DIR" image-build-uds-tokenizer
+
+    log "Deploying kind cluster with MODEL_NAME=$MODEL ..."
+    EPP_TAG="${EPP_TAG:-program-aware}" \
+    EPP_CONFIG="$SCRIPT_DIR/$(yaml_get "phases.0.epp_config")" \
+    MODEL_NAME="$MODEL" \
+    make -C "$REPO_DIR" env-dev-kind
+
+    cd "$SCRIPT_DIR"
+    log "Kind cluster deployed."
+}
+
+tune_simulator() {
+    # Base args — same as deploy/components/vllm-sim/deployments.yaml.
+    local base_args=(
+        "--port=8200"
+        "--model=$MODEL"
+        "--enable-kvcache=false"
+        "--block-size=16"
+        "--zmq-endpoint=tcp://${EPP_NAME}.${NAMESPACE}.svc.cluster.local:5557"
+        "--event-batch-size=16"
+        "--tokenizers-cache-dir=/tokenizer-cache"
+        "--data-parallel-size=1"
+    )
+
+    # Read extra_args from YAML.
+    local extra_json
+    extra_json="$(yaml_get infra.vllm.extra_args '[]')"
+
+    # Parse extra_args JSON array into bash array.
+    local extra_args=()
+    if [ "$extra_json" != "[]" ] && [ -n "$extra_json" ]; then
+        while IFS= read -r arg; do
+            extra_args+=("$arg")
+        done < <(python3 -c "import json; [print(a) for a in json.loads('$extra_json')]")
+    fi
+
+    if [ ${#extra_args[@]} -eq 0 ]; then
+        log "No vllm extra_args in scenario, skipping simulator tuning."
+        return
+    fi
+
+    # Combine base + extra.
+    local all_args=("${base_args[@]}" "${extra_args[@]}")
+
+    # Build JSON array for kubectl patch.
+    local args_json
+    args_json="$(printf '%s\n' "${all_args[@]}" | python3 -c "import sys, json; print(json.dumps([line.strip() for line in sys.stdin]))")"
+
+    log "Tuning vllm-sim with ${#all_args[@]} args ..."
+    kubectl -n "$NAMESPACE" patch deployment "$VLLM_DEPLOY" --type='json' \
+        -p="[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args\",\"value\":$args_json}]"
+
+    # Wait for rollout.
+    kubectl -n "$NAMESPACE" rollout status deployment/"$VLLM_DEPLOY" --timeout=120s
+
+    log "Waiting 10s for simulator to stabilize ..."
+    sleep 10
+    check_gateway
+    log "Simulator tuned."
+}
+
 run_loadgen() {
     local output_file="$1"
     local label="$2"
 
-    log "Starting $label load test (warmup=${WARMUP}s, duration=${DURATION}s) ..."
+    log "Starting $label load test ..."
     python3 "$SCRIPT_DIR/fairness_loadgen.py" \
+        --scenario "$SCRIPT_DIR/$SCENARIO" \
         --gateway-url "$GATEWAY_URL" \
         --model "$MODEL" \
-        --programs "$PROGRAMS" \
-        --duration "$DURATION" \
-        --warmup "$WARMUP" \
-        --max-tokens "$MAX_TOKENS" \
-        --timeout "$TIMEOUT" \
-        --concurrency "$CONCURRENCY" \
         --output "$output_file"
     log "$label load test complete."
 }
@@ -111,62 +218,72 @@ run_loadgen() {
 # --- Main ---
 main() {
     log "=== Fairness A/B Test ==="
-    log "Gateway:  $GATEWAY_URL"
+    log "Scenario: $SCENARIO"
     log "Model:    $MODEL"
-    log "Programs: $PROGRAMS"
-    log "Duration: ${WARMUP}s warmup + ${DURATION}s measurement"
+    log "Gateway:  $GATEWAY_URL"
+    log "Kind:     $INFRA_KIND"
     log ""
 
-    # Create output directories.
-    mkdir -p "$BASELINE_DIR" "$PA_DIR" "$COMPARISON_DIR"
+    # Deploy kind cluster if requested.
+    if [ "$INFRA_KIND" = "true" ] || [ "$INFRA_KIND" = "True" ]; then
+        deploy_kind
+    fi
 
     # Pre-flight check.
     check_gateway
 
-    # --- Phase 1: Baseline ---
+    # Tune simulator.
+    tune_simulator
+
+    # Read phases from YAML.
+    local phases_json
+    phases_json="$(yaml_get phases '[]')"
+    local phase_count
+    phase_count="$(python3 -c "import json; print(len(json.loads('$phases_json')))")"
+
+    log "Running $phase_count phases ..."
+
+    local phase_dirs=()
+    for i in $(seq 0 $((phase_count - 1))); do
+        local phase_name
+        phase_name="$(yaml_get "phases.$i.name")"
+        local epp_config
+        epp_config="$(yaml_get "phases.$i.epp_config")"
+
+        local phase_dir="$RESULTS_DIR/$phase_name"
+        mkdir -p "$phase_dir"
+        phase_dirs+=("$phase_dir")
+
+        log ""
+        log "========================================="
+        log "  PHASE $((i+1))/$phase_count: $phase_name"
+        log "========================================="
+
+        switch_config "$epp_config" "$phase_name"
+        run_loadgen "$phase_dir/results.jsonl" "$phase_name"
+        snapshot_metrics "$phase_dir/metrics_final.txt"
+
+        # Brief pause between phases.
+        if [ $i -lt $((phase_count - 1)) ]; then
+            log "Pausing 15s between phases ..."
+            sleep 15
+        fi
+    done
+
+    # --- Analysis ---
     log ""
     log "========================================="
-    log "  PHASE 1: BASELINE (No Fairness)"
-    log "========================================="
-    switch_config "$BASELINE_CONFIG" "baseline (sim-epp-config)"
-    run_loadgen "$BASELINE_DIR/results.jsonl" "Baseline"
-    snapshot_metrics "$BASELINE_DIR/metrics_final.txt"
-
-    # Brief pause between tests.
-    log "Pausing 15s between tests ..."
-    sleep 15
-
-    # --- Phase 2: Program-Aware ---
-    log ""
-    log "========================================="
-    log "  PHASE 2: PROGRAM-AWARE FAIRNESS"
-    log "========================================="
-    switch_config "$PA_CONFIG" "program-aware (sim-program-aware-config)"
-
-    # Verify plugin loaded.
-    log "Verifying program-aware plugin loaded ..."
-    kubectl -n "$NAMESPACE" logs deployment/"$EPP_NAME" -c epp --tail=30 | grep -i "program-aware" || \
-        log "WARNING: Could not confirm program-aware plugin in logs."
-
-    run_loadgen "$PA_DIR/results.jsonl" "Program-Aware"
-    snapshot_metrics "$PA_DIR/metrics_final.txt"
-
-    # --- Phase 3: Analysis ---
-    log ""
-    log "========================================="
-    log "  PHASE 3: ANALYSIS"
+    log "  ANALYSIS"
     log "========================================="
     python3 "$SCRIPT_DIR/analyze_results.py" \
-        --baseline "$BASELINE_DIR/results.jsonl" \
-        --program-aware "$PA_DIR/results.jsonl" \
-        --output "$COMPARISON_DIR/"
+        --results-dir "$RESULTS_DIR"
 
     log ""
     log "=== Test complete! ==="
-    log "Results:    $RESULTS_DIR"
-    log "Baseline:   $BASELINE_DIR/results.jsonl"
-    log "Prog-Aware: $PA_DIR/results.jsonl"
-    log "Comparison: $COMPARISON_DIR/"
+    log "Results: $RESULTS_DIR"
+    for dir in "${phase_dirs[@]}"; do
+        log "  $(basename "$dir"): $dir/results.jsonl"
+    done
 }
 
 main "$@"

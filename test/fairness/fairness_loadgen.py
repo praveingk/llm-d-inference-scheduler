@@ -2,17 +2,18 @@
 """
 Async load generator for fairness A/B testing.
 
-Spawns one async task per program, each sending requests at a configured rate.
-Each request includes the x-gateway-inference-fairness-id header.
+Reads a scenario YAML to determine per-program workload profiles, then spawns
+one async sender per program instance. Each instance sends requests at its
+configured rate with a unique x-gateway-inference-fairness-id header.
 Results are logged as JSONL for post-hoc analysis.
 
 Usage:
     python3 fairness_loadgen.py \
-        --gateway-url http://localhost:8080 \
-        --model "Qwen/Qwen2-0.5B-Instruct" \
-        --programs "prog-heavy:10,prog-medium:3,prog-light:1" \
-        --duration 180 --warmup 30 --max-tokens 100 \
-        --output results.jsonl
+        --scenario scenarios/stress-h100.yaml \
+        --gateway-url http://localhost:30080 \
+        --output results/baseline/results.jsonl
+
+CLI args override YAML values when provided.
 """
 
 import argparse
@@ -25,24 +26,27 @@ import uuid
 from dataclasses import dataclass, field
 
 import aiohttp
+import yaml
 
-# Fixed prompt (~200 tokens) used for all requests.
-FIXED_PROMPT = (
-    "Explain in detail the process of photosynthesis in plants, "
-    "including the light-dependent reactions and the Calvin cycle. "
-    "Describe the role of chlorophyll, the electron transport chain, "
-    "and ATP synthase in converting light energy into chemical energy. "
-    "Also discuss the factors that affect the rate of photosynthesis "
-    "such as light intensity, carbon dioxide concentration, and temperature. "
-    "Finally, explain how photosynthesis is related to cellular respiration "
-    "and the overall carbon cycle in the ecosystem."
+# Base sentence (~12 tokens) repeated to approximate target prompt length.
+_BASE_SENTENCE = (
+    "The quick brown fox jumps over the lazy dog near the riverbank. "
 )
 
 
+def generate_prompt(target_tokens: int) -> str:
+    """Generate a prompt of approximately target_tokens length."""
+    repeats = max(1, target_tokens // 12)
+    return _BASE_SENTENCE * repeats
+
+
 @dataclass
-class ProgramConfig:
-    name: str
-    rate: float  # requests per second
+class ProgramInstance:
+    """A single sender instance with a unique fairness ID."""
+    fairness_id: str
+    rate: float
+    prompt: str
+    max_tokens: int
 
 
 @dataclass
@@ -60,7 +64,7 @@ class RequestResult:
 
 @dataclass
 class Stats:
-    """Live stats tracker per program."""
+    """Live stats tracker per program instance."""
     sent: int = 0
     completed: int = 0
     errors: int = 0
@@ -79,34 +83,43 @@ class Stats:
         return s[len(s) // 2]
 
 
-def parse_programs(spec: str) -> list[ProgramConfig]:
-    """Parse 'name:rate,name:rate,...' into ProgramConfig list."""
-    programs = []
-    for part in spec.split(","):
-        name, rate = part.strip().split(":")
-        programs.append(ProgramConfig(name=name.strip(), rate=float(rate.strip())))
-    return programs
+def expand_programs(programs_cfg: dict) -> list[ProgramInstance]:
+    """Expand program configs with count into individual instances."""
+    instances = []
+    for name, cfg in programs_cfg.items():
+        count = cfg.get("count", 1)
+        rate = cfg["rate"]
+        prompt = generate_prompt(cfg["prompt_tokens"])
+        max_tokens = cfg["max_tokens"]
+        for i in range(count):
+            fairness_id = f"{name}-{i}"
+            instances.append(ProgramInstance(
+                fairness_id=fairness_id,
+                rate=rate,
+                prompt=prompt,
+                max_tokens=max_tokens,
+            ))
+    return instances
 
 
 async def send_request(
     session: aiohttp.ClientSession,
     url: str,
     model: str,
-    program: ProgramConfig,
-    max_tokens: int,
+    instance: ProgramInstance,
     timeout_sec: float,
 ) -> RequestResult:
     """Send a single completion request and return timing result."""
     request_id = str(uuid.uuid4())[:8]
     payload = {
         "model": model,
-        "prompt": FIXED_PROMPT,
-        "max_tokens": max_tokens,
+        "prompt": instance.prompt,
+        "max_tokens": instance.max_tokens,
         "temperature": 0,
     }
     headers = {
         "Content-Type": "application/json",
-        "x-gateway-inference-fairness-id": program.name,
+        "x-gateway-inference-fairness-id": instance.fairness_id,
     }
 
     sent_at = time.time()
@@ -124,7 +137,7 @@ async def send_request(
                 body = await resp.json()
                 usage = body.get("usage", {})
                 return RequestResult(
-                    program_id=program.name,
+                    program_id=instance.fairness_id,
                     request_id=request_id,
                     sent_at=sent_at,
                     completed_at=completed_at,
@@ -136,7 +149,7 @@ async def send_request(
             else:
                 text = await resp.text()
                 return RequestResult(
-                    program_id=program.name,
+                    program_id=instance.fairness_id,
                     request_id=request_id,
                     sent_at=sent_at,
                     completed_at=completed_at,
@@ -147,7 +160,7 @@ async def send_request(
     except asyncio.TimeoutError:
         completed_at = time.time()
         return RequestResult(
-            program_id=program.name,
+            program_id=instance.fairness_id,
             request_id=request_id,
             sent_at=sent_at,
             completed_at=completed_at,
@@ -158,7 +171,7 @@ async def send_request(
     except Exception as e:
         completed_at = time.time()
         return RequestResult(
-            program_id=program.name,
+            program_id=instance.fairness_id,
             request_id=request_id,
             sent_at=sent_at,
             completed_at=completed_at,
@@ -168,12 +181,11 @@ async def send_request(
         )
 
 
-async def program_sender(
+async def instance_sender(
     session: aiohttp.ClientSession,
     url: str,
     model: str,
-    program: ProgramConfig,
-    max_tokens: int,
+    instance: ProgramInstance,
     duration: float,
     warmup: float,
     timeout_sec: float,
@@ -182,13 +194,13 @@ async def program_sender(
     start_time: float,
     concurrency_limit: int,
 ):
-    """Send requests for one program at the configured rate."""
-    interval = 1.0 / program.rate
+    """Send requests for one program instance at the configured rate."""
+    interval = 1.0 / instance.rate
     sem = asyncio.Semaphore(concurrency_limit)
 
     async def do_request():
         async with sem:
-            result = await send_request(session, url, model, program, max_tokens, timeout_sec)
+            result = await send_request(session, url, model, instance, timeout_sec)
             stats.sent += 1
             elapsed = result.sent_at - start_time
             if elapsed >= warmup:
@@ -214,24 +226,37 @@ async def program_sender(
         tasks.append(asyncio.create_task(do_request()))
         next_send += interval
 
-    # Wait for all in-flight requests to complete (cooldown).
-    if tasks:
+    # Drain in-flight requests with progress reporting.
+    pending = [t for t in tasks if not t.done()]
+    if pending:
+        total = len(tasks)
+        print(f"\n  {instance.fairness_id}: window ended, {len(pending)}/{total} in-flight, draining...")
+        while pending:
+            done, pending = await asyncio.wait(pending, timeout=5)
+            if pending:
+                print(f"  {instance.fairness_id}: {len(pending)}/{total} still in-flight...")
+    elif tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-def print_live_status(programs: list[ProgramConfig], stats_map: dict[str, Stats], elapsed: float, duration: float):
+def print_live_status(
+    instances: list[ProgramInstance],
+    stats_map: dict[str, Stats],
+    elapsed: float,
+    duration: float,
+):
     """Print a single-line status update."""
     parts = [f"\r[{elapsed:.0f}/{duration:.0f}s]"]
-    for p in programs:
-        s = stats_map[p.name]
+    for inst in instances:
+        s = stats_map[inst.fairness_id]
         avg = f"{s.avg_latency_ms:.0f}" if s.completed > 0 else "-"
-        parts.append(f" {p.name}:{s.completed}ok/{s.errors}err/avg={avg}ms")
+        parts.append(f" {inst.fairness_id}:{s.completed}ok/{s.errors}err/avg={avg}ms")
     sys.stdout.write("".join(parts))
     sys.stdout.flush()
 
 
 async def status_printer(
-    programs: list[ProgramConfig],
+    instances: list[ProgramInstance],
     stats_map: dict[str, Stats],
     start_time: float,
     duration: float,
@@ -243,32 +268,47 @@ async def status_printer(
         elapsed = time.time() - start_time
         if elapsed >= duration + warmup:
             break
-        print_live_status(programs, stats_map, elapsed, duration + warmup)
+        print_live_status(instances, stats_map, elapsed, duration + warmup)
     sys.stdout.write("\n")
 
 
 async def run_loadgen(args):
-    programs = parse_programs(args.programs)
-    total_rate = sum(p.rate for p in programs)
+    # Load scenario YAML.
+    with open(args.scenario) as f:
+        scenario = yaml.safe_load(f)
 
-    print(f"Load generator configuration:")
-    print(f"  Gateway:    {args.gateway_url}")
-    print(f"  Model:      {args.model}")
-    print(f"  Duration:   {args.duration}s (+ {args.warmup}s warmup)")
-    print(f"  Max tokens: {args.max_tokens}")
-    print(f"  Programs:")
-    for p in programs:
-        print(f"    {p.name}: {p.rate} req/s")
-    print(f"  Total rate: {total_rate} req/s")
-    print(f"  Output:     {args.output}")
+    # Extract settings (CLI args override YAML).
+    model = args.model or scenario["model"]
+    test_cfg = scenario.get("test", {})
+    duration = args.duration if args.duration is not None else test_cfg.get("duration", 180)
+    warmup = args.warmup if args.warmup is not None else test_cfg.get("warmup", 30)
+    timeout = args.timeout if args.timeout is not None else test_cfg.get("timeout", 60)
+    concurrency = args.concurrency if args.concurrency is not None else test_cfg.get("concurrency", 50)
+    gateway_url = args.gateway_url or scenario.get("infra", {}).get("gateway_url", "http://localhost:30080")
+
+    # Expand programs into instances.
+    instances = expand_programs(scenario["programs"])
+    total_rate = sum(inst.rate for inst in instances)
+
+    print("Load generator configuration:")
+    print(f"  Gateway:     {gateway_url}")
+    print(f"  Model:       {model}")
+    print(f"  Scenario:    {args.scenario}")
+    print(f"  Duration:    {duration}s (+ {warmup}s warmup)")
+    print(f"  Concurrency: {concurrency} per instance")
+    print(f"  Instances:   {len(instances)}")
+    for inst in instances:
+        print(f"    {inst.fairness_id}: {inst.rate} req/s, ~{len(inst.prompt)//4} prompt tokens, {inst.max_tokens} max output tokens")
+    print(f"  Total rate:  {total_rate} req/s")
+    print(f"  Output:      {args.output}")
     print()
 
     # Verify gateway is reachable.
-    url = f"{args.gateway_url.rstrip('/')}/v1/completions"
+    url = f"{gateway_url.rstrip('/')}/v1/completions"
     async with aiohttp.ClientSession() as session:
         try:
             test_payload = {
-                "model": args.model,
+                "model": model,
                 "prompt": "hello",
                 "max_tokens": 1,
                 "temperature": 0,
@@ -289,35 +329,34 @@ async def run_loadgen(args):
             sys.exit(1)
 
     # Run the test.
-    results_map: dict[str, list[RequestResult]] = {p.name: [] for p in programs}
-    stats_map: dict[str, Stats] = {p.name: Stats() for p in programs}
+    results_map: dict[str, list[RequestResult]] = {inst.fairness_id: [] for inst in instances}
+    stats_map: dict[str, Stats] = {inst.fairness_id: Stats() for inst in instances}
     start_time = time.time()
 
-    print(f"\nStarting load generation (warmup={args.warmup}s, measurement={args.duration}s)...")
+    print(f"\nStarting load generation (warmup={warmup}s, measurement={duration}s)...")
 
     async with aiohttp.ClientSession() as session:
         sender_tasks = []
-        for p in programs:
+        for inst in instances:
             task = asyncio.create_task(
-                program_sender(
+                instance_sender(
                     session=session,
                     url=url,
-                    model=args.model,
-                    program=p,
-                    max_tokens=args.max_tokens,
-                    duration=args.duration,
-                    warmup=args.warmup,
-                    timeout_sec=args.timeout,
-                    results=results_map[p.name],
-                    stats=stats_map[p.name],
+                    model=model,
+                    instance=inst,
+                    duration=duration,
+                    warmup=warmup,
+                    timeout_sec=timeout,
+                    results=results_map[inst.fairness_id],
+                    stats=stats_map[inst.fairness_id],
                     start_time=start_time,
-                    concurrency_limit=args.concurrency,
+                    concurrency_limit=concurrency,
                 )
             )
             sender_tasks.append(task)
 
         printer_task = asyncio.create_task(
-            status_printer(programs, stats_map, start_time, args.duration, args.warmup)
+            status_printer(instances, stats_map, start_time, duration, warmup)
         )
 
         await asyncio.gather(*sender_tasks, return_exceptions=True)
@@ -325,8 +364,8 @@ async def run_loadgen(args):
 
     # Combine and write results.
     all_results = []
-    for p in programs:
-        all_results.extend(results_map[p.name])
+    for inst in instances:
+        all_results.extend(results_map[inst.fairness_id])
     all_results.sort(key=lambda r: r.sent_at)
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
@@ -338,27 +377,26 @@ async def run_loadgen(args):
     total_elapsed = time.time() - start_time
     print(f"\nDone in {total_elapsed:.1f}s. Wrote {len(all_results)} results to {args.output}")
     print()
-    print(f"{'Program':<15} {'Sent':>6} {'OK':>6} {'Err':>5} {'Avg(ms)':>10} {'P50(ms)':>10}")
-    print("-" * 60)
-    for p in programs:
-        s = stats_map[p.name]
+    print(f"{'Instance':<20} {'Sent':>6} {'OK':>6} {'Err':>5} {'Avg(ms)':>10} {'P50(ms)':>10}")
+    print("-" * 65)
+    for inst in instances:
+        s = stats_map[inst.fairness_id]
         latencies = sorted(s.latencies) if s.latencies else []
         avg = f"{s.avg_latency_ms:.1f}" if s.completed > 0 else "-"
         p50 = f"{latencies[len(latencies)//2]:.1f}" if latencies else "-"
-        print(f"{p.name:<15} {s.sent:>6} {s.completed:>6} {s.errors:>5} {avg:>10} {p50:>10}")
+        print(f"{inst.fairness_id:<20} {s.sent:>6} {s.completed:>6} {s.errors:>5} {avg:>10} {p50:>10}")
     print()
 
 
 def main():
     parser = argparse.ArgumentParser(description="Fairness A/B load generator")
-    parser.add_argument("--gateway-url", required=True, help="Gateway URL (e.g., http://localhost:8080)")
-    parser.add_argument("--model", required=True, help="Model name for completions API")
-    parser.add_argument("--programs", required=True, help="Comma-separated name:rate pairs (e.g., prog-heavy:10,prog-light:1)")
-    parser.add_argument("--duration", type=int, default=180, help="Measurement duration in seconds (default: 180)")
-    parser.add_argument("--warmup", type=int, default=30, help="Warmup duration in seconds (default: 30)")
-    parser.add_argument("--max-tokens", type=int, default=100, help="Max tokens per request (default: 100)")
-    parser.add_argument("--timeout", type=float, default=60, help="Per-request timeout in seconds (default: 60)")
-    parser.add_argument("--concurrency", type=int, default=50, help="Max concurrent requests per program (default: 50)")
+    parser.add_argument("--scenario", required=True, help="Path to scenario YAML file")
+    parser.add_argument("--gateway-url", default=None, help="Gateway URL (overrides YAML)")
+    parser.add_argument("--model", default=None, help="Model name (overrides YAML)")
+    parser.add_argument("--duration", type=int, default=None, help="Measurement duration in seconds (overrides YAML)")
+    parser.add_argument("--warmup", type=int, default=None, help="Warmup duration in seconds (overrides YAML)")
+    parser.add_argument("--timeout", type=float, default=None, help="Per-request timeout in seconds (overrides YAML)")
+    parser.add_argument("--concurrency", type=int, default=None, help="Max concurrent requests per instance (overrides YAML)")
     parser.add_argument("--output", required=True, help="Output JSONL file path")
     args = parser.parse_args()
     asyncio.run(run_loadgen(args))
