@@ -34,6 +34,9 @@ test/fairness/
 
 # Run a specific scenario
 SCENARIO=scenarios/uniform-fairness.yaml ./run_test.sh
+
+# Override the model (e.g. use the TinyLlama model from `make env-dev-kind`)
+MODEL=TinyLlama/TinyLlama-1.1B-Chat-v1.0 ./run_test.sh
 ```
 
 ### Using an existing cluster (no kind)

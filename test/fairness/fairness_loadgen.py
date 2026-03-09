@@ -92,7 +92,7 @@ def expand_programs(programs_cfg: dict) -> list[ProgramInstance]:
         prompt = generate_prompt(cfg["prompt_tokens"])
         max_tokens = cfg["max_tokens"]
         for i in range(count):
-            fairness_id = f"{name}-{i}"
+            fairness_id = name if count == 1 else f"{name}-{i}"
             instances.append(ProgramInstance(
                 fairness_id=fairness_id,
                 rate=rate,

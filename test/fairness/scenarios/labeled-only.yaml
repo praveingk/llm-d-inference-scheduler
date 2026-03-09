@@ -1,0 +1,56 @@
+# Scenario: Labeled Programs Only (Sanity Check)
+#
+# What is being tested:
+#   No default queue traffic at all. All requests have a fairness header.
+#   This is a regression test to ensure the reserved-slot dispatch logic
+#   does not break when there is no default queue. Every default slot
+#   should fall back to the best labeled queue (work-conserving).
+#
+# Expected results:
+#   - program-aware phase: identical behavior to baseline. The scoring formula
+#     handles fairness among labeled programs as before. All three programs
+#     should get roughly proportional service based on their wait times.
+#   - baseline phase: same as program-aware since there is no default queue
+#     to interfere.
+
+name: labeled-only
+
+model: meta-llama/Llama-3.1-8B-Instruct
+
+infra:
+  kind: true
+  namespace: default
+  vllm:
+    extra_args: []
+
+test:
+  duration: 120
+  warmup: 30
+  concurrency: 50
+  timeout: 60
+
+programs:
+  # Three labeled programs at different rates. No default-flow.
+  prog-low:
+    count: 1
+    rate: 1
+    prompt_tokens: 200
+    max_tokens: 100
+  prog-medium:
+    count: 1
+    rate: 3
+    prompt_tokens: 200
+    max_tokens: 100
+  prog-high:
+    count: 1
+    rate: 8
+    prompt_tokens: 200
+    max_tokens: 100
+
+phases:
+  - name: baseline
+    epp_config: configs/baseline.yaml
+  - name: baseline-round-robin
+    epp_config: configs/round-robin.yaml
+  - name: program-aware
+    epp_config: configs/program-aware.yaml

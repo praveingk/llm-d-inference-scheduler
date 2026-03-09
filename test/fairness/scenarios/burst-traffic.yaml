@@ -1,0 +1,60 @@
+# Scenario: Burst Traffic from Default Queue
+#
+# What is being tested:
+#   A sudden high-volume burst of unlabeled traffic (20 req/s) arrives
+#   alongside steady labeled programs (3 req/s each). This tests whether
+#   the reserved-slot dispatch holds firm under pressure — the default
+#   queue should not exceed its 20% share even when it floods the system.
+#
+# Expected results:
+#   - program-aware phase: default queue is capped at ~20% of picks despite
+#     generating ~3x the total labeled traffic. Labeled programs maintain
+#     stable latency throughout the burst. No labeled program starvation.
+#   - baseline phase: the burst overwhelms the scoring formula. The default
+#     queue's high queue depth and wait time inflate its score, causing it
+#     to dominate picks. Labeled programs see spiking latency and possible
+#     timeouts.
+
+name: burst-traffic
+
+model: meta-llama/Llama-3.1-8B-Instruct
+
+infra:
+  kind: true
+  namespace: default
+  vllm:
+    extra_args: []
+
+test:
+  duration: 60
+  warmup: 30
+  concurrency: 50
+  timeout: 60
+
+programs:
+  # Burst of unlabeled traffic.
+  default-flow:
+    count: 4
+    rate: 5
+    prompt_tokens: 200
+    max_tokens: 100
+
+  # Two steady labeled programs.
+  prog-steady-a:
+    count: 1
+    rate: 3
+    prompt_tokens: 200
+    max_tokens: 100
+  prog-steady-b:
+    count: 1
+    rate: 3
+    prompt_tokens: 200
+    max_tokens: 100
+
+phases:
+  - name: baseline
+    epp_config: configs/baseline.yaml
+  - name: baseline-round-robin
+    epp_config: configs/round-robin.yaml
+  - name: program-aware
+    epp_config: configs/program-aware.yaml

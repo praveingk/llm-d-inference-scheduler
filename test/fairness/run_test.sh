@@ -52,7 +52,7 @@ else:
 }
 
 # --- Read scenario ---
-MODEL="$(yaml_get model)"
+MODEL="${MODEL:-$(yaml_get model)}"
 INFRA_KIND="$(yaml_get infra.kind false)"
 GATEWAY_URL="$(yaml_get infra.gateway_url http://localhost:30080)"
 NAMESPACE="$(yaml_get infra.namespace default)"
@@ -61,15 +61,16 @@ METRICS_URL="${METRICS_URL:-http://localhost:9090}"
 # Derive names from model.
 MODEL_SLUG="$(echo "${MODEL##*/}" | tr '[:upper:]' '[:lower:]' | tr ' /_.' '-')"
 EPP_NAME="${EPP_NAME:-${MODEL_SLUG}-endpoint-picker}"
-VLLM_DEPLOY="${MODEL_SLUG}-vllm-sim"
+VLLM_DEPLOY="${VLLM_DEPLOY:-${MODEL_SLUG}-vllm-sim}"
 
 # If kind, override gateway URL.
 if [ "$INFRA_KIND" = "true" ] || [ "$INFRA_KIND" = "True" ]; then
     GATEWAY_URL="http://localhost:30080"
 fi
 
-# Output directories.
-RESULTS_DIR="$SCRIPT_DIR/results"
+# Output directories — nested under results/<scenario-name>/.
+SCENARIO_NAME="$(basename "$SCENARIO" .yaml)"
+RESULTS_DIR="$SCRIPT_DIR/results/$SCENARIO_NAME"
 
 # --- Helpers ---
 log() { echo "[$(date +%H:%M:%S)] $*"; }
@@ -163,6 +164,7 @@ tune_simulator() {
         "--event-batch-size=16"
         "--tokenizers-cache-dir=/tokenizer-cache"
         "--data-parallel-size=1"
+        "--seed=50"
     )
 
     # Read extra_args from YAML.

@@ -20,7 +20,7 @@ infra:
 # Load generation — read by fairness_loadgen.py
 test:
   duration: 60
-  warmup: 15
+  warmup: 30
   concurrency: 50
   timeout: 60
 
@@ -42,9 +42,9 @@ programs:
     max_tokens: 1024
 
 phases:
-  - name: program-aware
-    epp_config: configs/program-aware.yaml
   - name: baseline
     epp_config: configs/baseline.yaml
   - name: baseline-round-robin
     epp_config: configs/round-robin.yaml
+  - name: program-aware
+    epp_config: configs/program-aware.yaml
