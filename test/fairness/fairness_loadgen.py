@@ -116,6 +116,7 @@ async def send_request(
         "prompt": instance.prompt,
         "max_tokens": instance.max_tokens,
         "temperature": 0,
+        "ignore_eos": True,
     }
     headers = {
         "Content-Type": "application/json",
@@ -312,6 +313,7 @@ async def run_loadgen(args):
                 "prompt": "hello",
                 "max_tokens": 1,
                 "temperature": 0,
+                "ignore_eos": True,
             }
             async with session.post(
                 url,

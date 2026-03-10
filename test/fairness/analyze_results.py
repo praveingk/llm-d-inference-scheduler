@@ -591,6 +591,309 @@ def plot_bar_dropped_grouped(phase_results: dict[str, list[dict]], phase_grouped
     print(f"  Saved grouped dropped bar chart: {path}")
 
 
+def parse_prometheus_snapshot(path: str) -> dict[str, float]:
+    """Parse a Prometheus text exposition file into a flat dict of metric_name{labels} -> value."""
+    metrics = {}
+    if not os.path.isfile(path) or os.path.getsize(path) == 0:
+        return metrics
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # Lines look like: metric_name{label="val",...} 123.0
+            # or: metric_name 123.0
+            parts = line.rsplit(" ", 1)
+            if len(parts) == 2:
+                try:
+                    metrics[parts[0]] = float(parts[1])
+                except ValueError:
+                    continue
+    return metrics
+
+
+def extract_program_counter(metrics: dict[str, float], metric_name: str) -> dict[str, float]:
+    """Extract per-program values for a counter/gauge metric.
+
+    Returns {program_id: value}.
+    """
+    result = {}
+    prefix = metric_name + "{"
+    for key, val in metrics.items():
+        if key.startswith(prefix):
+            # Extract program_id from labels like {program_id="prog-heavy"}
+            match = re.search(r'program_id="([^"]+)"', key)
+            if match:
+                result[match.group(1)] = val
+    return result
+
+
+def extract_histogram_avg(metrics: dict[str, float], metric_name: str) -> dict[str, float]:
+    """Extract per-program average from a histogram (_sum / _count).
+
+    Returns {program_id: average}.
+    """
+    sums = extract_program_counter(metrics, metric_name + "_sum")
+    counts = extract_program_counter(metrics, metric_name + "_count")
+    result = {}
+    for prog in sums:
+        if prog in counts and counts[prog] > 0:
+            result[prog] = sums[prog] / counts[prog]
+    return result
+
+
+def extract_global_histogram(metrics: dict[str, float], metric_name: str) -> tuple[float, float]:
+    """Extract global (non-labeled) histogram sum and count.
+
+    Returns (sum, count).
+    """
+    sum_key = metric_name + "_sum"
+    count_key = metric_name + "_count"
+    return metrics.get(sum_key, 0.0), metrics.get(count_key, 0.0)
+
+
+def load_phase_subsystems(results_dir: str, phases: list[tuple[str, str]]) -> dict[str, str]:
+    """Load metrics subsystem per phase from metrics_subsystem.txt.
+
+    Returns {phase_name: subsystem}. Defaults to 'program_aware' if file is missing.
+    """
+    subsystems = {}
+    for name, jsonl_path in phases:
+        sub_path = os.path.join(os.path.dirname(jsonl_path), "metrics_subsystem.txt")
+        if os.path.isfile(sub_path):
+            with open(sub_path) as f:
+                subsystems[name] = f.read().strip() or "program_aware"
+        else:
+            subsystems[name] = "program_aware"
+    return subsystems
+
+
+def load_phase_prometheus(results_dir: str, phases: list[tuple[str, str]]) -> dict[str, dict[str, float]]:
+    """Load Prometheus snapshots for all phases.
+
+    Returns {phase_name: flat_metrics_dict}. Phases with empty/missing snapshots get empty dicts.
+    """
+    phase_metrics = {}
+    for name, jsonl_path in phases:
+        metrics_path = os.path.join(os.path.dirname(jsonl_path), "metrics_final.txt")
+        phase_metrics[name] = parse_prometheus_snapshot(metrics_path)
+    return phase_metrics
+
+
+def plot_prometheus_requests_dispatched(phase_metrics: dict[str, dict[str, float]], output_dir: str, phase_subsystems: dict[str, str] | None = None):
+    """Plot requests_total vs dispatched_total per program, per phase."""
+    if not HAS_MATPLOTLIB:
+        return
+
+    if phase_subsystems is None:
+        phase_subsystems = {}
+
+    phase_names = list(phase_metrics.keys())
+    all_programs = sorted(set(
+        prog
+        for phase, m in phase_metrics.items()
+        for prog in extract_program_counter(m, f"{phase_subsystems.get(phase, 'program_aware')}_requests_total")
+    ))
+    if not all_programs:
+        return
+
+    fig, axes = plt.subplots(1, len(phase_names), figsize=(7 * len(phase_names), 6), squeeze=False)
+
+    for ax_idx, phase in enumerate(phase_names):
+        ax = axes[0][ax_idx]
+        m = phase_metrics[phase]
+        sub = phase_subsystems.get(phase, "program_aware")
+        requests = extract_program_counter(m, f"{sub}_requests_total")
+        dispatched = extract_program_counter(m, f"{sub}_dispatched_total")
+
+        x = np.arange(len(all_programs))
+        width = 0.35
+        req_vals = [requests.get(p, 0) for p in all_programs]
+        disp_vals = [dispatched.get(p, 0) for p in all_programs]
+
+        ax.bar(x - width / 2, req_vals, width, label="requests", color="steelblue", alpha=0.8)
+        ax.bar(x + width / 2, disp_vals, width, label="dispatched", color="seagreen", alpha=0.8)
+        ax.set_xlabel("Program")
+        ax.set_ylabel("Count")
+        ax.set_title(f"{phase}")
+        ax.set_xticks(x)
+        ax.set_xticklabels(all_programs, rotation=25, ha="right", fontsize=7)
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3, axis="y")
+
+    fig.suptitle("Prometheus: Requests vs Dispatched", fontsize=13)
+    plt.tight_layout()
+    path = os.path.join(output_dir, "prometheus_requests_dispatched.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+    print(f"  Saved Prometheus requests/dispatched plot: {path}")
+
+
+def plot_prometheus_tokens(phase_metrics: dict[str, dict[str, float]], output_dir: str, phase_subsystems: dict[str, str] | None = None):
+    """Plot input_tokens_total vs output_tokens_total per program, per phase."""
+    if not HAS_MATPLOTLIB:
+        return
+
+    if phase_subsystems is None:
+        phase_subsystems = {}
+
+    phase_names = list(phase_metrics.keys())
+    all_programs = sorted(set(
+        prog
+        for phase, m in phase_metrics.items()
+        for prog in extract_program_counter(m, f"{phase_subsystems.get(phase, 'program_aware')}_input_tokens_total")
+    ))
+    if not all_programs:
+        return
+
+    fig, axes = plt.subplots(1, len(phase_names), figsize=(7 * len(phase_names), 6), squeeze=False)
+
+    for ax_idx, phase in enumerate(phase_names):
+        ax = axes[0][ax_idx]
+        m = phase_metrics[phase]
+        sub = phase_subsystems.get(phase, "program_aware")
+        input_tokens = extract_program_counter(m, f"{sub}_input_tokens_total")
+        output_tokens = extract_program_counter(m, f"{sub}_output_tokens_total")
+
+        x = np.arange(len(all_programs))
+        width = 0.35
+        in_vals = [input_tokens.get(p, 0) for p in all_programs]
+        out_vals = [output_tokens.get(p, 0) for p in all_programs]
+
+        ax.bar(x - width / 2, in_vals, width, label="input tokens", color="coral", alpha=0.8)
+        ax.bar(x + width / 2, out_vals, width, label="output tokens", color="mediumpurple", alpha=0.8)
+        ax.set_xlabel("Program")
+        ax.set_ylabel("Tokens")
+        ax.set_title(f"{phase}")
+        ax.set_xticks(x)
+        ax.set_xticklabels(all_programs, rotation=25, ha="right", fontsize=7)
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3, axis="y")
+
+    fig.suptitle("Prometheus: Token Counts", fontsize=13)
+    plt.tight_layout()
+    path = os.path.join(output_dir, "prometheus_tokens.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+    print(f"  Saved Prometheus tokens plot: {path}")
+
+
+def plot_prometheus_wait_time(phase_metrics: dict[str, dict[str, float]], output_dir: str, phase_subsystems: dict[str, str] | None = None):
+    """Plot average wait time per program, per phase."""
+    if not HAS_MATPLOTLIB:
+        return
+
+    if phase_subsystems is None:
+        phase_subsystems = {}
+
+    phase_names = list(phase_metrics.keys())
+    all_programs = sorted(set(
+        prog
+        for phase, m in phase_metrics.items()
+        for prog in extract_histogram_avg(m, f"{phase_subsystems.get(phase, 'program_aware')}_wait_time_milliseconds")
+    ))
+    if not all_programs:
+        return
+
+    bar_colors = plt.cm.tab10(np.linspace(0, 1, max(len(phase_names), 1)))
+    fig, ax = plt.subplots(figsize=(max(8, len(all_programs) * 2), 6))
+    x = np.arange(len(all_programs))
+    width = 0.8 / len(phase_names)
+
+    for p_idx, phase in enumerate(phase_names):
+        sub = phase_subsystems.get(phase, "program_aware")
+        avgs = extract_histogram_avg(phase_metrics[phase], f"{sub}_wait_time_milliseconds")
+        vals = [avgs.get(p, 0) for p in all_programs]
+        offset = (p_idx - len(phase_names) / 2 + 0.5) * width
+        ax.bar(x + offset, vals, width, label=phase, color=bar_colors[p_idx], alpha=0.8)
+
+    ax.set_xlabel("Program")
+    ax.set_ylabel("Avg Wait Time (ms)")
+    ax.set_title("Prometheus: Average Queue Wait Time")
+    ax.set_xticks(x)
+    ax.set_xticklabels(all_programs, rotation=25, ha="right", fontsize=8)
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3, axis="y")
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, "prometheus_wait_time.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+    print(f"  Saved Prometheus wait time plot: {path}")
+
+
+def plot_prometheus_pick_latency_sum(phase_metrics: dict[str, dict[str, float]], output_dir: str, phase_subsystems: dict[str, str] | None = None):
+    """Plot total (sum) pick latency per phase."""
+    if not HAS_MATPLOTLIB:
+        return
+
+    if phase_subsystems is None:
+        phase_subsystems = {}
+
+    phase_names = list(phase_metrics.keys())
+    sums = []
+    for phase in phase_names:
+        sub = phase_subsystems.get(phase, "program_aware")
+        s, _ = extract_global_histogram(phase_metrics[phase], f"{sub}_pick_latency_microseconds")
+        sums.append(s)
+
+    if all(v == 0 for v in sums):
+        return
+
+    fig, ax = plt.subplots(figsize=(max(6, len(phase_names) * 2), 5))
+    bar_colors = plt.cm.tab10(np.linspace(0, 1, max(len(phase_names), 1)))
+    x = np.arange(len(phase_names))
+    ax.bar(x, sums, color=bar_colors[:len(phase_names)], alpha=0.8)
+    ax.set_xlabel("Phase")
+    ax.set_ylabel("Total Pick Latency (µs)")
+    ax.set_title("Prometheus: Total Pick Latency (Sum)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(phase_names, rotation=15, ha="right", fontsize=9)
+    ax.grid(True, alpha=0.3, axis="y")
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, "prometheus_pick_latency_sum.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+    print(f"  Saved Prometheus pick latency sum plot: {path}")
+
+
+def plot_prometheus_pick_latency_mean(phase_metrics: dict[str, dict[str, float]], output_dir: str, phase_subsystems: dict[str, str] | None = None):
+    """Plot mean pick latency per phase."""
+    if not HAS_MATPLOTLIB:
+        return
+
+    if phase_subsystems is None:
+        phase_subsystems = {}
+
+    phase_names = list(phase_metrics.keys())
+    means = []
+    for phase in phase_names:
+        sub = phase_subsystems.get(phase, "program_aware")
+        s, c = extract_global_histogram(phase_metrics[phase], f"{sub}_pick_latency_microseconds")
+        means.append(s / c if c > 0 else 0)
+
+    if all(v == 0 for v in means):
+        return
+
+    fig, ax = plt.subplots(figsize=(max(6, len(phase_names) * 2), 5))
+    bar_colors = plt.cm.tab10(np.linspace(0, 1, max(len(phase_names), 1)))
+    x = np.arange(len(phase_names))
+    ax.bar(x, means, color=bar_colors[:len(phase_names)], alpha=0.8)
+    ax.set_xlabel("Phase")
+    ax.set_ylabel("Mean Pick Latency (µs)")
+    ax.set_title("Prometheus: Mean Pick Latency")
+    ax.set_xticks(x)
+    ax.set_xticklabels(phase_names, rotation=15, ha="right", fontsize=9)
+    ax.grid(True, alpha=0.3, axis="y")
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, "prometheus_pick_latency_mean.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+    print(f"  Saved Prometheus pick latency mean plot: {path}")
+
+
 def save_summary_json(phase_groups: dict[str, dict[str, list[float]]], output_dir: str):
     """Save machine-readable summary as JSON."""
     all_programs = sorted(set(
@@ -653,6 +956,18 @@ def main():
     plot_bar_dropped_grouped(phase_results, phase_grouped, comparison_dir)
     plot_timeseries(phase_results, comparison_dir)
     save_summary_json(phase_groups, comparison_dir)
+
+    # Prometheus metrics graphs (best-effort — skip if snapshots are empty).
+    phase_prom = load_phase_prometheus(args.results_dir, phases)
+    phase_subs = load_phase_subsystems(args.results_dir, phases)
+    if any(m for m in phase_prom.values()):
+        print("\nGenerating Prometheus plots...")
+        print(f"  Subsystems: {phase_subs}")
+        plot_prometheus_requests_dispatched(phase_prom, comparison_dir, phase_subs)
+        plot_prometheus_tokens(phase_prom, comparison_dir, phase_subs)
+        plot_prometheus_wait_time(phase_prom, comparison_dir, phase_subs)
+        plot_prometheus_pick_latency_sum(phase_prom, comparison_dir, phase_subs)
+        plot_prometheus_pick_latency_mean(phase_prom, comparison_dir, phase_subs)
 
     print("\nDone!")
 

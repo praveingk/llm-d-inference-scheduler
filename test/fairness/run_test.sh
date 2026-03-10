@@ -99,6 +99,36 @@ snapshot_metrics() {
         log "WARNING: Could not fetch metrics from $METRICS_URL (is port-forward active?)"
 }
 
+METRICS_PF_PID=""
+
+start_metrics_portforward() {
+    # Kill any existing metrics port-forward.
+    if [ -n "$METRICS_PF_PID" ] && kill -0 "$METRICS_PF_PID" 2>/dev/null; then
+        kill "$METRICS_PF_PID" 2>/dev/null || true
+        wait "$METRICS_PF_PID" 2>/dev/null || true
+    fi
+
+    log "Starting metrics port-forward (deployment/$EPP_NAME 9090:9090) ..."
+    kubectl -n "$NAMESPACE" port-forward "deployment/$EPP_NAME" 9090:9090 > /dev/null 2>&1 &
+    METRICS_PF_PID=$!
+
+    # Brief wait for port-forward to establish.
+    sleep 3
+    if kill -0 "$METRICS_PF_PID" 2>/dev/null; then
+        log "Metrics port-forward started (PID $METRICS_PF_PID)."
+    else
+        log "WARNING: Metrics port-forward failed to start. Prometheus snapshots may be empty."
+        METRICS_PF_PID=""
+    fi
+}
+
+cleanup_metrics_portforward() {
+    if [ -n "$METRICS_PF_PID" ] && kill -0 "$METRICS_PF_PID" 2>/dev/null; then
+        kill "$METRICS_PF_PID" 2>/dev/null || true
+        wait "$METRICS_PF_PID" 2>/dev/null || true
+    fi
+}
+
 switch_config() {
     local config_file="$1"
     local config_name="$2"
@@ -119,9 +149,18 @@ switch_config() {
     kubectl -n "$NAMESPACE" rollout restart deployment/"$EPP_NAME"
     kubectl -n "$NAMESPACE" rollout status deployment/"$EPP_NAME" --timeout=120s
 
+    # Disable metrics auth for this phase.
+    kubectl -n "$NAMESPACE" patch deployment "$EPP_NAME" --type='json' \
+        -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--metrics-endpoint-auth=false"}]' 2>/dev/null || \
+        log "WARNING: Could not disable metrics auth."
+    kubectl -n "$NAMESPACE" rollout status deployment/"$EPP_NAME" --timeout=120s 2>/dev/null || true
+
     # Wait for EPP to be ready.
     log "Waiting 10s for EPP to stabilize ..."
     sleep 10
+
+    # Re-establish metrics port-forward after pod restart.
+    start_metrics_portforward
 
     # Verify gateway still responds after config switch.
     check_gateway
@@ -219,6 +258,7 @@ run_loadgen() {
 
 # --- Main ---
 main() {
+    trap cleanup_metrics_portforward EXIT
     log "=== Fairness A/B Test ==="
     log "Scenario: $SCENARIO"
     log "Model:    $MODEL"
@@ -252,8 +292,12 @@ main() {
         local epp_config
         epp_config="$(yaml_get "phases.$i.epp_config")"
 
+        local metrics_subsystem
+        metrics_subsystem="$(yaml_get "phases.$i.metrics_subsystem" "program_aware")"
+
         local phase_dir="$RESULTS_DIR/$phase_name"
         mkdir -p "$phase_dir"
+        echo "$metrics_subsystem" > "$phase_dir/metrics_subsystem.txt"
         phase_dirs+=("$phase_dir")
 
         log ""
