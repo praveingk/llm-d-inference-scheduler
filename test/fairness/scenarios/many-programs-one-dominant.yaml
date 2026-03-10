@@ -42,7 +42,7 @@ infra:
       - "--prefill-time-per-token=17us"
       - "--inter-token-latency=6ms"
       - "--inter-token-latency-std-dev=1ms"
-      - "--max-num-seqs=256"
+      - "--max-num-seqs=20"
       - "--max-model-len=4096"
 
 test:
