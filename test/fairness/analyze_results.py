@@ -232,6 +232,19 @@ def plot_cdf(phase_groups: dict[str, dict[str, list[float]]], output_dir: str):
     plt.close()
     print(f"  Saved CDF plot: {path}")
 
+    txt_path = os.path.join(output_dir, "cdf_comparison.txt")
+    with open(txt_path, "w") as f:
+        for phase in phase_names:
+            f.write(f"# Phase: {phase}\n")
+            f.write("program\tlatency_ms\tcdf\n")
+            for prog in all_programs:
+                latencies = sorted(phase_groups[phase].get(prog, []))
+                if latencies:
+                    cdf = np.arange(1, len(latencies) + 1) / len(latencies)
+                    for lat, c in zip(latencies, cdf):
+                        f.write(f"{prog}\t{lat:.2f}\t{c:.4f}\n")
+            f.write("\n")
+
 
 def plot_cdf_overlay(phase_groups: dict[str, dict[str, list[float]]], output_dir: str):
     """Plot overlaid CDF — all programs, all phases on one chart."""
@@ -267,6 +280,17 @@ def plot_cdf_overlay(phase_groups: dict[str, dict[str, list[float]]], output_dir
     plt.savefig(path, dpi=150)
     plt.close()
     print(f"  Saved overlay CDF plot: {path}")
+
+    txt_path = os.path.join(output_dir, "cdf_overlay.txt")
+    with open(txt_path, "w") as f:
+        f.write("phase\tprogram\tlatency_ms\tcdf\n")
+        for phase in phase_names:
+            for prog in all_programs:
+                latencies = sorted(phase_groups[phase].get(prog, []))
+                if latencies:
+                    cdf = np.arange(1, len(latencies) + 1) / len(latencies)
+                    for lat, c in zip(latencies, cdf):
+                        f.write(f"{phase}\t{prog}\t{lat:.2f}\t{c:.4f}\n")
 
 
 def plot_bar_chart(phase_groups: dict[str, dict[str, list[float]]], output_dir: str):
@@ -310,6 +334,14 @@ def plot_bar_chart(phase_groups: dict[str, dict[str, list[float]]], output_dir: 
     plt.close()
     print(f"  Saved bar chart: {path}")
 
+    txt_path = os.path.join(output_dir, "bar_comparison.txt")
+    with open(txt_path, "w") as f:
+        f.write("program\tphase\tP50\tP95\tP99\n")
+        for prog in all_programs:
+            for phase in phase_names:
+                stats = compute_stats(phase_groups[phase].get(prog, []))
+                f.write(f"{prog}\t{phase}\t{stats['p50']:.2f}\t{stats['p95']:.2f}\t{stats['p99']:.2f}\n")
+
 
 def plot_timeseries(phase_results: dict[str, list[dict]], output_dir: str):
     """Plot latency over time for each program, one subplot per phase."""
@@ -345,6 +377,16 @@ def plot_timeseries(phase_results: dict[str, list[dict]], output_dir: str):
     plt.close()
     print(f"  Saved timeseries plot: {path}")
 
+    txt_path = os.path.join(output_dir, "timeseries.txt")
+    with open(txt_path, "w") as f:
+        f.write("phase\tprogram\ttime_s\tlatency_ms\n")
+        for phase in phase_names:
+            results = phase_results[phase]
+            t0 = min(r["sent_at"] for r in results) if results else 0
+            for r in results:
+                if r["status"] == "ok":
+                    f.write(f"{phase}\t{r['program_id']}\t{r['sent_at'] - t0:.3f}\t{r['total_ms']:.2f}\n")
+
 
 def plot_cdf_grouped(phase_grouped: dict[str, dict[str, list[float]]], output_dir: str):
     """Plot CDF with instances merged into program groups, one subplot per phase."""
@@ -379,6 +421,19 @@ def plot_cdf_grouped(phase_grouped: dict[str, dict[str, list[float]]], output_di
     plt.savefig(path, dpi=150)
     plt.close()
     print(f"  Saved grouped CDF plot: {path}")
+
+    txt_path = os.path.join(output_dir, "cdf_grouped.txt")
+    with open(txt_path, "w") as f:
+        for phase in phase_names:
+            f.write(f"# Phase: {phase}\n")
+            f.write("group\tlatency_ms\tcdf\n")
+            for grp in all_groups:
+                latencies = sorted(phase_grouped[phase].get(grp, []))
+                if latencies:
+                    cdf = np.arange(1, len(latencies) + 1) / len(latencies)
+                    for lat, c in zip(latencies, cdf):
+                        f.write(f"{grp}\t{lat:.2f}\t{c:.4f}\n")
+            f.write("\n")
 
 
 def plot_bar_mean_individual(phase_groups: dict[str, dict[str, list[float]]], output_dir: str):
@@ -420,6 +475,14 @@ def plot_bar_mean_individual(phase_groups: dict[str, dict[str, list[float]]], ou
     plt.close()
     print(f"  Saved individual mean bar chart: {path}")
 
+    txt_path = os.path.join(output_dir, "bar_mean_individual.txt")
+    with open(txt_path, "w") as f:
+        f.write("program\tphase\tmean_ms\n")
+        for prog in all_programs:
+            for phase in phase_names:
+                stats = compute_stats(phase_groups[phase].get(prog, []))
+                f.write(f"{prog}\t{phase}\t{stats['mean']:.2f}\n")
+
 
 def plot_bar_mean_grouped(phase_grouped: dict[str, dict[str, list[float]]], output_dir: str):
     """Plot bar chart of mean latency per program group (instances merged), per phase."""
@@ -459,6 +522,14 @@ def plot_bar_mean_grouped(phase_grouped: dict[str, dict[str, list[float]]], outp
     plt.savefig(path, dpi=150)
     plt.close()
     print(f"  Saved grouped mean bar chart: {path}")
+
+    txt_path = os.path.join(output_dir, "bar_mean_grouped.txt")
+    with open(txt_path, "w") as f:
+        f.write("group\tphase\tmean_ms\n")
+        for grp in all_groups:
+            for phase in phase_names:
+                stats = compute_stats(phase_grouped[phase].get(grp, []))
+                f.write(f"{grp}\t{phase}\t{stats['mean']:.2f}\n")
 
 
 def plot_bar_chart_grouped(phase_grouped: dict[str, dict[str, list[float]]], output_dir: str):
@@ -501,6 +572,14 @@ def plot_bar_chart_grouped(phase_grouped: dict[str, dict[str, list[float]]], out
     plt.savefig(path, dpi=150)
     plt.close()
     print(f"  Saved grouped P50/P95/P99 bar chart: {path}")
+
+    txt_path = os.path.join(output_dir, "bar_comparison_grouped.txt")
+    with open(txt_path, "w") as f:
+        f.write("group\tphase\tP50\tP95\tP99\n")
+        for grp in all_groups:
+            for phase in phase_names:
+                stats = compute_stats(phase_grouped[phase].get(grp, []))
+                f.write(f"{grp}\t{phase}\t{stats['p50']:.2f}\t{stats['p95']:.2f}\t{stats['p99']:.2f}\n")
 
 
 def count_dropped(results: list[dict], program_id: str) -> int:
@@ -551,6 +630,13 @@ def plot_bar_dropped_individual(phase_results: dict[str, list[dict]], phase_grou
     plt.close()
     print(f"  Saved individual dropped bar chart: {path}")
 
+    txt_path = os.path.join(output_dir, "bar_dropped_individual.txt")
+    with open(txt_path, "w") as f:
+        f.write("program\tphase\tdropped\n")
+        for prog in all_programs:
+            for phase in phase_names:
+                f.write(f"{prog}\t{phase}\t{count_dropped(phase_results[phase], prog)}\n")
+
 
 def plot_bar_dropped_grouped(phase_results: dict[str, list[dict]], phase_grouped: dict[str, dict[str, list[float]]], output_dir: str):
     """Plot bar chart of dropped (non-ok) request counts per program group, per phase."""
@@ -589,6 +675,13 @@ def plot_bar_dropped_grouped(phase_results: dict[str, list[dict]], phase_grouped
     plt.savefig(path, dpi=150)
     plt.close()
     print(f"  Saved grouped dropped bar chart: {path}")
+
+    txt_path = os.path.join(output_dir, "bar_dropped_grouped.txt")
+    with open(txt_path, "w") as f:
+        f.write("group\tphase\tdropped\n")
+        for grp in all_groups:
+            for phase in phase_names:
+                f.write(f"{grp}\t{phase}\t{count_dropped_grouped(phase_results[phase], grp)}\n")
 
 
 def parse_prometheus_snapshot(path: str) -> dict[str, float]:
@@ -728,6 +821,17 @@ def plot_prometheus_requests_dispatched(phase_metrics: dict[str, dict[str, float
     plt.close()
     print(f"  Saved Prometheus requests/dispatched plot: {path}")
 
+    txt_path = os.path.join(output_dir, "prometheus_requests_dispatched.txt")
+    with open(txt_path, "w") as f:
+        f.write("phase\tprogram\trequests\tdispatched\n")
+        for phase in phase_names:
+            m = phase_metrics[phase]
+            sub = phase_subsystems.get(phase, "program_aware")
+            requests = extract_program_counter(m, f"{sub}_requests_total")
+            dispatched = extract_program_counter(m, f"{sub}_dispatched_total")
+            for p in all_programs:
+                f.write(f"{phase}\t{p}\t{requests.get(p, 0):.0f}\t{dispatched.get(p, 0):.0f}\n")
+
 
 def plot_prometheus_tokens(phase_metrics: dict[str, dict[str, float]], output_dir: str, phase_subsystems: dict[str, str] | None = None):
     """Plot input_tokens_total vs output_tokens_total per program, per phase."""
@@ -777,6 +881,17 @@ def plot_prometheus_tokens(phase_metrics: dict[str, dict[str, float]], output_di
     plt.close()
     print(f"  Saved Prometheus tokens plot: {path}")
 
+    txt_path = os.path.join(output_dir, "prometheus_tokens.txt")
+    with open(txt_path, "w") as f:
+        f.write("phase\tprogram\tinput_tokens\toutput_tokens\n")
+        for phase in phase_names:
+            m = phase_metrics[phase]
+            sub = phase_subsystems.get(phase, "program_aware")
+            input_tokens = extract_program_counter(m, f"{sub}_input_tokens_total")
+            output_tokens = extract_program_counter(m, f"{sub}_output_tokens_total")
+            for p in all_programs:
+                f.write(f"{phase}\t{p}\t{input_tokens.get(p, 0):.0f}\t{output_tokens.get(p, 0):.0f}\n")
+
 
 def plot_prometheus_wait_time(phase_metrics: dict[str, dict[str, float]], output_dir: str, phase_subsystems: dict[str, str] | None = None):
     """Plot average wait time per program, per phase."""
@@ -821,6 +936,15 @@ def plot_prometheus_wait_time(phase_metrics: dict[str, dict[str, float]], output
     plt.close()
     print(f"  Saved Prometheus wait time plot: {path}")
 
+    txt_path = os.path.join(output_dir, "prometheus_wait_time.txt")
+    with open(txt_path, "w") as f:
+        f.write("phase\tprogram\tavg_wait_ms\n")
+        for phase in phase_names:
+            sub = phase_subsystems.get(phase, "program_aware")
+            avgs = extract_histogram_avg(phase_metrics[phase], f"{sub}_wait_time_milliseconds")
+            for p in all_programs:
+                f.write(f"{phase}\t{p}\t{avgs.get(p, 0):.2f}\n")
+
 
 def plot_prometheus_pick_latency_sum(phase_metrics: dict[str, dict[str, float]], output_dir: str, phase_subsystems: dict[str, str] | None = None):
     """Plot total (sum) pick latency per phase."""
@@ -857,6 +981,12 @@ def plot_prometheus_pick_latency_sum(phase_metrics: dict[str, dict[str, float]],
     plt.close()
     print(f"  Saved Prometheus pick latency sum plot: {path}")
 
+    txt_path = os.path.join(output_dir, "prometheus_pick_latency_sum.txt")
+    with open(txt_path, "w") as f:
+        f.write("phase\ttotal_pick_latency_us\n")
+        for phase, s in zip(phase_names, sums):
+            f.write(f"{phase}\t{s:.2f}\n")
+
 
 def plot_prometheus_pick_latency_mean(phase_metrics: dict[str, dict[str, float]], output_dir: str, phase_subsystems: dict[str, str] | None = None):
     """Plot mean pick latency per phase."""
@@ -892,6 +1022,12 @@ def plot_prometheus_pick_latency_mean(phase_metrics: dict[str, dict[str, float]]
     plt.savefig(path, dpi=150)
     plt.close()
     print(f"  Saved Prometheus pick latency mean plot: {path}")
+
+    txt_path = os.path.join(output_dir, "prometheus_pick_latency_mean.txt")
+    with open(txt_path, "w") as f:
+        f.write("phase\tmean_pick_latency_us\n")
+        for phase, m in zip(phase_names, means):
+            f.write(f"{phase}\t{m:.2f}\n")
 
 
 def save_summary_json(phase_groups: dict[str, dict[str, list[float]]], output_dir: str):

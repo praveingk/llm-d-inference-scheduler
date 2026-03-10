@@ -84,8 +84,8 @@ phases:
   - name: program-aware
     epp_config: configs/program-aware.yaml
     metrics_subsystem: program_aware
-  - name: baseline
-    epp_config: configs/baseline.yaml
+  # - name: baseline
+  #   epp_config: configs/baseline.yaml
   - name: baseline-round-robin
     epp_config: configs/round-robin.yaml
     metrics_subsystem: round_robin

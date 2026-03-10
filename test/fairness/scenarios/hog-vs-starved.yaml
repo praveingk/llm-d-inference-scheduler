@@ -41,7 +41,7 @@ infra:
       - "--prefill-time-per-token=17us"
       - "--inter-token-latency=6ms"
       - "--inter-token-latency-std-dev=1ms"
-      - "--max-num-seqs=16"
+      - "--max-num-seqs=10"
       - "--max-model-len=4096"
 
 test:
@@ -84,8 +84,8 @@ phases:
   - name: program-aware
     epp_config: configs/program-aware.yaml
     metrics_subsystem: program_aware
-  - name: baseline
-    epp_config: configs/baseline.yaml
+  # - name: baseline
+  #   epp_config: configs/baseline.yaml
   - name: baseline-round-robin
     epp_config: configs/round-robin.yaml
     metrics_subsystem: round_robin
