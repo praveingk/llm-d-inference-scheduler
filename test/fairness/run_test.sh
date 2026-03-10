@@ -149,10 +149,10 @@ switch_config() {
     kubectl -n "$NAMESPACE" rollout restart deployment/"$EPP_NAME"
     kubectl -n "$NAMESPACE" rollout status deployment/"$EPP_NAME" --timeout=120s
 
-    # Disable metrics auth for this phase.
+    # Patch EPP: disable metrics auth + fix metrics scrape port (sim serves on 8200, not sidecar 8000).
     kubectl -n "$NAMESPACE" patch deployment "$EPP_NAME" --type='json' \
-        -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--metrics-endpoint-auth=false"}]' 2>/dev/null || \
-        log "WARNING: Could not disable metrics auth."
+        -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--metrics-endpoint-auth=false"},{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--model-server-metrics-port"},{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"8200"}]' 2>/dev/null || \
+        log "WARNING: Could not patch EPP deployment."
     kubectl -n "$NAMESPACE" rollout status deployment/"$EPP_NAME" --timeout=120s 2>/dev/null || true
 
     # Wait for EPP to be ready.
