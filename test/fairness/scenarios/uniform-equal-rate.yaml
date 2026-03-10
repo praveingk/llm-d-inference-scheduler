@@ -1,0 +1,91 @@
+# Scenario: Uniform Equal Rate
+#
+# Goal: Show a case where round-robin matches or beats program-aware. When all
+#       programs are identical, PA's scoring signals converge to the same value
+#       and picks become effectively arbitrary. Round-robin's deterministic
+#       cycling gives more predictable, lower-jitter dispatch.
+#
+# Setup:
+#   - 6 programs, each at 4 req/s, identical token profiles (200 input / 100 output)
+#   - Total load: 24 req/s against ~280 loaded req/s capacity (~9%)
+#   - Light-to-moderate load — enough to build small queues for scoring to act on.
+#
+# Scoring signals at play:
+#   - All three signals (avgWaitMs, queueLen, totalDispatched) converge to the
+#     same values across programs because traffic is symmetric.
+#   - PA's score differences between programs shrink to near-zero, making pick
+#     order depend on IterateQueues iteration order (map iteration = random).
+#   - Round-robin cycles A->B->C->D->E->F->A->... deterministically.
+#
+# Expected results:
+#   - program-aware: all programs get roughly equal dispatch, but with higher
+#     variance (jitter) in per-program wait times because the scoring tie-breaks
+#     are nondeterministic.
+#   - round-robin: all programs get strictly equal dispatch. Wait time variance
+#     across programs is minimal. This is RR's best case.
+#   - baseline: depends on upstream default policy behavior.
+
+name: uniform-equal-rate
+
+model: meta-llama/Llama-3.1-8B-Instruct
+
+infra:
+  kind: true
+  namespace: default
+  vllm:
+    extra_args:
+      - "--latency-calculator=per-token"
+      - "--prefill-overhead=6ms"
+      - "--prefill-time-per-token=17us"
+      - "--inter-token-latency=6ms"
+      - "--inter-token-latency-std-dev=1ms"
+      - "--max-num-seqs=256"
+      - "--max-model-len=4096"
+
+test:
+  duration: 90
+  warmup: 30
+  concurrency: 50
+  timeout: 60
+
+programs:
+  prog-a:
+    count: 1
+    rate: 4
+    prompt_tokens: 200
+    max_tokens: 100
+  prog-b:
+    count: 1
+    rate: 4
+    prompt_tokens: 200
+    max_tokens: 100
+  prog-c:
+    count: 1
+    rate: 4
+    prompt_tokens: 200
+    max_tokens: 100
+  prog-d:
+    count: 1
+    rate: 4
+    prompt_tokens: 200
+    max_tokens: 100
+  prog-e:
+    count: 1
+    rate: 4
+    prompt_tokens: 200
+    max_tokens: 100
+  prog-f:
+    count: 1
+    rate: 4
+    prompt_tokens: 200
+    max_tokens: 100
+
+phases:
+  - name: program-aware
+    epp_config: configs/program-aware.yaml
+    metrics_subsystem: program_aware
+  - name: baseline
+    epp_config: configs/baseline.yaml
+  - name: baseline-round-robin
+    epp_config: configs/round-robin.yaml
+    metrics_subsystem: round_robin

@@ -15,7 +15,6 @@ infra:
       - "--inter-token-latency-std-dev=1ms"
       - "--max-num-seqs=256"
       - "--max-model-len=4096"
-      - "--time-factor-under-load=1.5"
 
 # Load generation — read by fairness_loadgen.py
 test:

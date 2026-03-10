@@ -1,0 +1,112 @@
+# Scenario: Many Small Programs vs One Dominant
+#
+# Goal: Show that program-aware scheduling protects many small consumers from a
+#       single dominant program at scale (9 total flow queues).
+#
+# Setup:
+#   - 1 dominant program (4 instances x 5 req/s = 20 req/s)
+#   - 8 small programs (1 instance x 1 req/s each = 8 req/s)
+#   - All use large request profile (300 input / 256 output, ~1.5s each)
+#   - Total load: 28 req/s against ~110 loaded req/s capacity (~25%)
+#   - The dominant program produces 71% of all traffic.
+#
+# Scoring signals at play:
+#   - totalDispatched (weight -0.3): the dominant program racks up dispatches
+#     fast, dragging its score down and freeing picks for small programs.
+#   - avgWaitMs (weight +0.4): small programs that begin queuing get their EWMA
+#     boosted, pulling them ahead of the dominant program in scoring.
+#   - queueLen (weight +0.3): the dominant program's queue is large, but the
+#     dispatched penalty offsets the queue depth benefit once it runs ahead.
+#
+# Expected results:
+#   - program-aware: each small program gets reliable, low-latency service. The
+#     dominant program's dispatch share is suppressed below its traffic share.
+#     All 8 small programs show similar, stable average wait times.
+#   - round-robin: each of the 9 flow queues gets ~11% of picks. The dominant
+#     program sends 20 req/s but only gets 11% of picks — its queue grows. Small
+#     programs also get only 11% each, identical to the dominant program.
+#     No compensation for the traffic asymmetry.
+#   - baseline: depends on upstream default policy behavior.
+
+name: many-programs-one-dominant
+
+model: meta-llama/Llama-3.1-8B-Instruct
+
+infra:
+  kind: true
+  namespace: default
+  vllm:
+    extra_args:
+      - "--latency-calculator=per-token"
+      - "--prefill-overhead=6ms"
+      - "--prefill-time-per-token=17us"
+      - "--inter-token-latency=6ms"
+      - "--inter-token-latency-std-dev=1ms"
+      - "--max-num-seqs=256"
+      - "--max-model-len=4096"
+
+test:
+  duration: 120
+  warmup: 30
+  concurrency: 50
+  timeout: 60
+
+programs:
+  # Dominant program: 4 instances producing 71% of total traffic.
+  prog-dominant:
+    count: 4
+    rate: 5
+    prompt_tokens: 300
+    max_tokens: 256
+
+  # 8 small programs at 1 req/s each.
+  prog-small-01:
+    count: 1
+    rate: 1
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-small-02:
+    count: 1
+    rate: 1
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-small-03:
+    count: 1
+    rate: 1
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-small-04:
+    count: 1
+    rate: 1
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-small-05:
+    count: 1
+    rate: 1
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-small-06:
+    count: 1
+    rate: 1
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-small-07:
+    count: 1
+    rate: 1
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-small-08:
+    count: 1
+    rate: 1
+    prompt_tokens: 300
+    max_tokens: 256
+
+phases:
+  - name: program-aware
+    epp_config: configs/program-aware.yaml
+    metrics_subsystem: program_aware
+  - name: baseline
+    epp_config: configs/baseline.yaml
+  - name: baseline-round-robin
+    epp_config: configs/round-robin.yaml
+    metrics_subsystem: round_robin
