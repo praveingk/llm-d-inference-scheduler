@@ -8,6 +8,7 @@ import (
 	programaware "github.com/llm-d/llm-d-inference-scheduler/pkg/plugins/program-aware"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/plugins/scorer"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
+	roundrobin "github.com/llm-d/llm-d-inference-scheduler/pkg/plugins/round-robin"
 )
 
 // RegisterAllPlugins registers the factory functions of all plugins in this repository.
@@ -31,4 +32,5 @@ func RegisterAllPlugins() {
 	plugin.Register(profile.AlwaysDisaggDeciderPluginType, profile.AlwaysDisaggPDDeciderPluginFactory)
 	// program-aware fairness plugin
 	plugin.Register(programaware.ProgramAwarePluginType, programaware.ProgramAwarePluginFactory)
+	plugin.Register(roundrobin.RoundRobinPluginType, roundrobin.RoundRobinPluginFactory)
 }

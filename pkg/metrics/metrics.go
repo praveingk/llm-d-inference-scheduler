@@ -7,6 +7,7 @@ import (
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/metrics"
 
 	programaware "github.com/llm-d/llm-d-inference-scheduler/pkg/plugins/program-aware"
+	roundrobin "github.com/llm-d/llm-d-inference-scheduler/pkg/plugins/round-robin"
 )
 
 const (
@@ -37,6 +38,7 @@ func GetCollectors() []prometheus.Collector {
 	collectors := make([]prometheus.Collector, 0, 1+len(extra))
 	collectors = append(collectors, SchedulerPDDecisionCount)
 	collectors = append(collectors, extra...)
+	collectors = append(collectors, roundrobin.GetCollectors()...)
 	return collectors
 }
 
