@@ -1,0 +1,91 @@
+# Scenario: Saturated Overload
+#
+# Goal: Show that under extreme overload with identical programs, PA's scoring
+#       formula loses discriminating power because all normalization caps
+#       saturate, while round-robin's mechanical cycling remains unaffected.
+#
+# Setup:
+#   - 5 programs, each with 3 instances x 10 req/s = 150 req/s total
+#   - Large request profile (300 input / 256 output, ~1.5s each)
+#   - Loaded capacity: ~110 req/s — system is at ~136% of capacity.
+#   - Every program generates 30 req/s (equal, symmetric overload).
+#
+# Scoring signals at play:
+#   - avgWaitMs (cap 5000ms): under sustained overload, all programs' EWMA wait
+#     times climb past the 5s cap. normalize() returns 1.0 for all — no signal.
+#   - queueLen (cap 100): all queues grow past 100 pending requests as the system
+#     falls behind. normalize() returns 1.0 for all — no signal.
+#   - totalDispatched (cap 1000): after ~33s per program (at ~30 dispatches/s),
+#     all programs hit the 1000 cap. normalize() returns 1.0 for all — no signal.
+#   - Net effect: all scores clamp to 0.4*1.0 + 0.3*1.0 - 0.3*1.0 = 0.4 for
+#     every program. PA cannot distinguish between them.
+#
+# Expected results:
+#   - program-aware: all programs get roughly equal dispatch, but with higher
+#     variance because tie-breaking is nondeterministic (map iteration order).
+#     Under overload, this jitter can compound — one program may get slightly
+#     more picks in a window, causing others to fall further behind.
+#   - round-robin: strict rotation regardless of overload level. Each program
+#     gets exactly 1/5 of picks with minimal variance. Wait times are high
+#     (system is overloaded) but equally distributed.
+#   - baseline: depends on upstream default policy behavior.
+
+name: saturated-overload
+
+model: meta-llama/Llama-3.1-8B-Instruct
+
+infra:
+  kind: true
+  namespace: default
+  vllm:
+    extra_args:
+      - "--latency-calculator=per-token"
+      - "--prefill-overhead=6ms"
+      - "--prefill-time-per-token=17us"
+      - "--inter-token-latency=6ms"
+      - "--inter-token-latency-std-dev=1ms"
+      - "--max-num-seqs=20"
+      - "--max-model-len=4096"
+
+test:
+  duration: 60
+  warmup: 30
+  concurrency: 50
+  timeout: 600
+
+programs:
+  prog-alpha:
+    count: 3
+    rate: 10
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-beta:
+    count: 3
+    rate: 10
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-gamma:
+    count: 3
+    rate: 10
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-delta:
+    count: 3
+    rate: 10
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-epsilon:
+    count: 3
+    rate: 10
+    prompt_tokens: 300
+    max_tokens: 256
+
+phases:
+  - name: program-aware
+    epp_config: configs/program-aware.yaml
+    metrics_subsystem: program_aware
+  # - name: baseline
+  #   epp_config: configs/baseline.yaml
+  - name: baseline-round-robin
+    epp_config: configs/round-robin.yaml
+    metrics_subsystem: round_robin

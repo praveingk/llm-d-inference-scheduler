@@ -1,0 +1,136 @@
+# Scenario: Production Mix — Multi-Program Staggered Workload
+#
+# Goal: Simulate a realistic shared inference cluster where programs with
+#       different rates, token costs, and arrival times compete for capacity.
+#       This exercises all three PA scoring signals simultaneously:
+#       totalDispatched (newcomer advantage), avgWaitMs (heavy-request boost),
+#       and queueLen (backlog detection).
+#
+# Timeline (measurement phase, after warmup):
+#   t=0-100s:    api-gateway x2  (bg, 3r/s each, light)    — steady API serving
+#   t=0-100s:    batch-etl x1    (bg, 2r/s, heavy)         — slow batch processing
+#   t=10-60s:    chatbot x1      (fg, 5r/s, medium)        — interactive session
+#   t=20-60s:    summarizer x1   (fg, 3r/s, heavy)         — document processing
+#   t=40-100s:   code-assist x1  (fg, 8r/s, medium)        — IDE completions burst
+#   t=60-90s:    realtime x1     (fg, 12r/s, light)        — latency-sensitive stream
+#
+# Capacity: max-num-seqs=10, ~800ms avg/req → ~12 req/s throughput.
+#
+# Load phases:
+#   t=0-10:   bg only               8 r/s   (67% capacity — moderate)
+#   t=10-20:  + chatbot             13 r/s   (108% — starts queuing)
+#   t=20-40:  + summarizer          16 r/s   (133% — queues growing)
+#   t=40-60:  + code-assist         24 r/s   (200% — heavy overload)
+#   t=60-70:  - chatbot,summarizer  28 r/s   (233% — peak, all 6 types active)
+#             + realtime
+#   t=70-90:  - (chatbot,summ gone) 28 r/s   wait no — chatbot ends t=60, summ ends t=60
+#   t=60-90:  bg + code + realtime  28 r/s   (233% — peak window)
+#   t=90-100: - realtime            18 r/s   (150% — winding down)
+#
+# Corrected load timeline:
+#   t=0-10:   api-gw(6) + batch(2)                         =  8 r/s
+#   t=10-20:  + chatbot(5)                                  = 13 r/s
+#   t=20-40:  + summarizer(3)                               = 16 r/s
+#   t=40-60:  + code-assist(8)                              = 24 r/s  ← all 6 types
+#   t=60-90:  - chatbot, - summarizer, + realtime(12)       = 28 r/s  ← peak
+#   t=90-100: - realtime                                    = 18 r/s  ← cool-down
+#
+# What to watch:
+#   - PA should give newcomers (chatbot, summarizer, code-assist, realtime) a
+#     scoring boost on arrival because their totalDispatched starts at 0 while
+#     background programs carry accumulated penalties.
+#   - Heavy programs (batch-etl, summarizer) should get proportionally more picks
+#     under PA because their queueLen and avgWaitMs signals are higher.
+#   - Realtime is light but very high rate — PA's totalDispatched penalty should
+#     kick in quickly, preventing it from starving heavier programs.
+#   - RR treats all programs identically regardless of cost, rate, or history.
+
+name: production-mix
+
+model: meta-llama/Llama-3.1-8B-Instruct
+
+infra:
+  kind: true
+  namespace: default
+  vllm:
+    extra_args:
+      - "--latency-calculator=per-token"
+      - "--prefill-overhead=6ms"
+      - "--prefill-time-per-token=17us"
+      - "--inter-token-latency=6ms"
+      - "--inter-token-latency-std-dev=1ms"
+      - "--max-num-seqs=10"
+      - "--max-model-len=4096"
+
+test:
+  duration: 90       # auto-extends to 100 because code-assist ends at t=100
+  warmup: 30
+  concurrency: 50
+  timeout: 600
+
+programs:
+  # --- Background programs (always-on) ---
+
+  # Steady light API traffic: 2 instances x 3 req/s = 6 req/s.
+  # Small requests (~150 input, 64 output) clear fast.
+  api-gateway:
+    background: true
+    count: 2
+    rate: 3
+    prompt_tokens: 150
+    max_tokens: 64
+
+  # Slow heavy batch job: 1 instance x 2 req/s.
+  # Large requests (~600 input, 512 output) occupy model slots for ~3s each.
+  batch-etl:
+    background: true
+    count: 1
+    rate: 2
+    prompt_tokens: 600
+    max_tokens: 512
+
+  # --- Foreground programs (staggered arrivals) ---
+
+  # Interactive chat session: medium cost, moderate rate.
+  chatbot:
+    start_time: 10
+    duration: 50
+    count: 1
+    rate: 5
+    prompt_tokens: 300
+    max_tokens: 128
+
+  # Document summarization: heavy cost, low rate.
+  summarizer:
+    start_time: 20
+    duration: 40
+    count: 1
+    rate: 3
+    prompt_tokens: 600
+    max_tokens: 512
+
+  # IDE code completions: medium cost, high rate burst.
+  code-assist:
+    start_time: 40
+    duration: 60
+    count: 1
+    rate: 8
+    prompt_tokens: 200
+    max_tokens: 128
+
+  # Real-time streaming: very light cost, very high rate.
+  realtime:
+    start_time: 60
+    duration: 30
+    count: 1
+    rate: 12
+    prompt_tokens: 100
+    max_tokens: 32
+
+phases:
+  - name: program-aware
+    epp_config: configs/program-aware.yaml
+    metrics_subsystem: program_aware
+  - name: baseline-round-robin
+    epp_config: configs/round-robin.yaml
+    metrics_subsystem: round_robin

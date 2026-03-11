@@ -1,0 +1,52 @@
+name: stress-h100-fairness
+
+model: meta-llama/Llama-3.1-8B-Instruct
+
+# Infrastructure — read by run_test.sh only
+infra:
+  kind: true
+  namespace: default
+  vllm:
+    extra_args:
+      - "--latency-calculator=per-token"
+      - "--prefill-overhead=6ms"
+      - "--prefill-time-per-token=17us"
+      - "--inter-token-latency=6ms"
+      - "--inter-token-latency-std-dev=1ms"
+      - "--max-num-seqs=20"
+      - "--max-model-len=4096"
+
+# Load generation — read by fairness_loadgen.py
+test:
+  duration: 30
+  warmup: 30
+  concurrency: 50
+  timeout: 600
+
+programs:
+  prog-heavy:
+    count: 3
+    rate: 5
+    prompt_tokens: 700
+    max_tokens: 256
+  prog-medium:
+    count: 10
+    rate: 2
+    prompt_tokens: 700
+    max_tokens: 256
+  prog-light:
+    count: 3
+    rate: 1
+    prompt_tokens: 700
+    max_tokens: 256
+
+phases:
+  - name: program-aware-drr
+    epp_config: configs/program-aware-drr.yaml
+    metrics_subsystem: program_aware
+  - name: program-aware
+    epp_config: configs/program-aware.yaml
+    metrics_subsystem: program_aware
+  - name: baseline-round-robin
+    epp_config: configs/round-robin.yaml
+    metrics_subsystem: round_robin

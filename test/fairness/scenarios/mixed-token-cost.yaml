@@ -1,0 +1,95 @@
+# Scenario: Mixed Token Cost
+#
+# Goal: Show that program-aware scheduling detects and compensates for programs
+#       whose requests are more expensive (more tokens = longer model occupancy),
+#       even when all programs send at the same request rate.
+#
+# Setup:
+#   - 2 heavy programs at 3 req/s each (500 input / 512 output tokens)
+#     Each heavy request takes ~3.1s to complete.
+#   - 3 light programs at 3 req/s each (100 input / 50 output tokens)
+#     Each light request takes ~0.3s to complete.
+#   - Total load: 15 req/s, but heavy requests consume ~10x more model time.
+#   - Effective GPU-time load: (6 * 3.1s) + (9 * 0.3s) = ~21.3 slot-seconds/s
+#     against 256 slots — moderate but asymmetric.
+#
+# Scoring signals at play:
+#   - queueLen (weight +0.3): heavy programs' queues grow because each request
+#     occupies a model slot ~10x longer. PA detects the backlog and boosts them.
+#   - avgWaitMs (weight +0.4): heavy programs experience higher wait times as
+#     their queues back up — further boosting their score.
+#   - totalDispatched (weight -0.3): both heavy and light programs send at the
+#     same rate, so this signal is roughly equal and does not help light programs.
+#
+# Expected results:
+#   - program-aware: heavy programs get a larger share of picks to compensate for
+#     their longer per-request time. Their queue depth and wait time stay
+#     controlled rather than growing linearly. Light programs still get fair
+#     service since their requests clear quickly.
+#   - round-robin: all 5 programs get exactly 1/5 of picks regardless of cost.
+#     Heavy programs' queues grow because they can't drain fast enough at equal
+#     pick rate. Light programs are unaffected but heavy programs suffer.
+#   - baseline: depends on upstream default policy behavior.
+
+name: mixed-token-cost
+
+model: meta-llama/Llama-3.1-8B-Instruct
+
+infra:
+  kind: true
+  namespace: default
+  vllm:
+    extra_args:
+      - "--latency-calculator=per-token"
+      - "--prefill-overhead=6ms"
+      - "--prefill-time-per-token=17us"
+      - "--inter-token-latency=6ms"
+      - "--inter-token-latency-std-dev=1ms"
+      - "--max-num-seqs=20"
+      - "--max-model-len=4096"
+
+test:
+  duration: 60
+  warmup: 30
+  concurrency: 50
+  timeout: 600
+
+programs:
+  # Heavy programs: large requests that occupy model slots for ~3.1s each.
+  prog-heavy-a:
+    count: 1
+    rate: 3
+    prompt_tokens: 500
+    max_tokens: 512
+  prog-heavy-b:
+    count: 1
+    rate: 3
+    prompt_tokens: 500
+    max_tokens: 512
+
+  # Light programs: small requests that complete in ~0.3s each.
+  prog-light-a:
+    count: 1
+    rate: 3
+    prompt_tokens: 100
+    max_tokens: 50
+  prog-light-b:
+    count: 1
+    rate: 3
+    prompt_tokens: 100
+    max_tokens: 50
+  prog-light-c:
+    count: 1
+    rate: 3
+    prompt_tokens: 100
+    max_tokens: 50
+
+phases:
+  - name: program-aware
+    epp_config: configs/program-aware.yaml
+    metrics_subsystem: program_aware
+  # - name: baseline
+  #   epp_config: configs/baseline.yaml
+  - name: baseline-round-robin
+    epp_config: configs/round-robin.yaml
+    metrics_subsystem: round_robin

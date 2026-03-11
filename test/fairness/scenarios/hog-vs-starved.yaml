@@ -1,0 +1,91 @@
+# Scenario: Hog vs Starved Programs
+#
+# Goal: Show that program-aware scheduling protects low-rate programs from a
+#       single high-rate "hog" that would otherwise dominate dispatch.
+#
+# Setup:
+#   - 1 hog program (3 instances x 10 req/s = 30 req/s total)
+#   - 4 quiet programs (1 instance x 1 req/s each = 4 req/s total)
+#   - All programs use the same medium request profile (200 input / 100 output)
+#   - Total load: 34 req/s against ~280 req/s loaded capacity (~12%)
+#
+# Scoring signals at play:
+#   - totalDispatched (weight -0.3): the hog accumulates dispatches fast and gets
+#     penalized, freeing picks for the quiet programs.
+#   - avgWaitMs (weight +0.4): quiet programs that start queuing get a boost from
+#     their growing EWMA wait time.
+#   - queueLen (weight +0.3): the hog's queue grows fastest, but the dispatched
+#     penalty outweighs the queue depth benefit once it runs ahead.
+#
+# Expected results:
+#   - program-aware: quiet programs get MORE than 1/5 of picks each because the
+#     hog's dispatched penalty actively compensates them. Wait time across quiet
+#     programs stays low and stable.
+#   - round-robin: each of the 5 flow queues (hog + 4 quiet) gets exactly 1/5 of
+#     picks. The hog sends 30 req/s but only gets 20% of picks — its queue grows
+#     unbounded. Quiet programs also get only 20% despite sending far less.
+#     No compensation for the imbalance.
+#   - baseline: depends on upstream default policy behavior.
+
+name: hog-vs-starved
+
+model: meta-llama/Llama-3.1-8B-Instruct
+
+infra:
+  kind: true
+  namespace: default
+  vllm:
+    extra_args:
+      - "--latency-calculator=per-token"
+      - "--prefill-overhead=6ms"
+      - "--prefill-time-per-token=17us"
+      - "--inter-token-latency=6ms"
+      - "--inter-token-latency-std-dev=1ms"
+      - "--max-num-seqs=15"
+      - "--max-model-len=4096"
+
+test:
+  duration: 60
+  warmup: 30
+  concurrency: 50
+  timeout: 600
+
+programs:
+  # Hog: floods the system with 30 req/s across 3 instances.
+  prog-hog:
+    count: 3
+    rate: 10
+    prompt_tokens: 200
+    max_tokens: 100
+
+  # 4 quiet programs at 1 req/s each.
+  prog-quiet-a:
+    count: 1
+    rate: 1
+    prompt_tokens: 200
+    max_tokens: 100
+  prog-quiet-b:
+    count: 1
+    rate: 1
+    prompt_tokens: 200
+    max_tokens: 100
+  prog-quiet-c:
+    count: 1
+    rate: 1
+    prompt_tokens: 200
+    max_tokens: 100
+  prog-quiet-d:
+    count: 1
+    rate: 1
+    prompt_tokens: 200
+    max_tokens: 100
+
+phases:
+  - name: program-aware
+    epp_config: configs/program-aware.yaml
+    metrics_subsystem: program_aware
+  # - name: baseline
+  #   epp_config: configs/baseline.yaml
+  - name: baseline-round-robin
+    epp_config: configs/round-robin.yaml
+    metrics_subsystem: round_robin

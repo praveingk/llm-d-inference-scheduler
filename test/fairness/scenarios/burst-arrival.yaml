@@ -1,0 +1,91 @@
+# Scenario: Burst Arrival — Staggered Program Timing
+#
+# Goal: Show that program-aware scheduling quickly adapts when new programs
+#       arrive into an already-loaded system. The newcomer starts with zero
+#       totalDispatched history, so PA's scoring formula naturally prioritizes
+#       it until it catches up to the residents.
+#
+# Timeline (measurement phase, after warmup):
+#   t=0-90s:  prog-resident x3 instances at 4 req/s each (background, 12 req/s total)
+#   t=30-60s: 1 burst program at 15 req/s (foreground, arrives mid-test)
+#   t=60-90s: 1 late program at 5 req/s (foreground, arrives late)
+#
+# Capacity: max-num-seqs=8, ~800ms/req → ~10 req/s throughput.
+# Baseline load (residents): 12 req/s — already exceeds capacity, creating queuing.
+# Peak load (residents + burst): 27 req/s — severe overload forces PA scoring to act.
+#
+# Scoring dynamics:
+#   - totalDispatched (weight -0.3): residents accumulate dispatches over time,
+#     carrying an increasing penalty. Newcomers start at 0 and get a natural
+#     boost from having no dispatch history.
+#   - avgWaitMs (weight +0.4): if newcomers start queuing, their EWMA ramps up
+#     from 0, giving them an additional boost.
+#   - queueLen (weight +0.3): newcomer queues build from empty, getting the
+#     queue depth signal to activate as their requests arrive.
+#
+# Expected results:
+#   - program-aware: burst/late programs get rapid initial service — their P50
+#     latency during their active window should be comparable to or better than
+#     the residents' steady-state. Residents see a brief latency bump when burst
+#     arrives but recover as burst's dispatch count catches up.
+#   - round-robin: each active program gets exactly 1/N of picks (N = number of
+#     active programs at that moment). No accommodation for newcomer's zero
+#     history — burst's queue may build up before RR rotates to it.
+
+name: burst-arrival
+
+model: meta-llama/Llama-3.1-8B-Instruct
+
+infra:
+  kind: true
+  namespace: default
+  vllm:
+    extra_args:
+      - "--latency-calculator=per-token"
+      - "--prefill-overhead=6ms"
+      - "--prefill-time-per-token=17us"
+      - "--inter-token-latency=6ms"
+      - "--inter-token-latency-std-dev=1ms"
+      - "--max-num-seqs=10"
+      - "--max-model-len=4096"
+
+test:
+  duration: 60       # auto-extends to 90 because prog-late ends at t=90
+  warmup: 30
+  concurrency: 50
+  timeout: 600
+
+programs:
+  # 3 resident instances: always-on background stress at 4 req/s each (12 req/s total).
+  prog-resident:
+    background: true
+    count: 3
+    rate: 4
+    prompt_tokens: 300
+    max_tokens: 128
+
+  # Burst: arrives 30s into measurement, runs for 30s at high rate.
+  prog-burst:
+    start_time: 30
+    duration: 30
+    count: 1
+    rate: 15
+    prompt_tokens: 300
+    max_tokens: 128
+
+  # Late arrival: arrives 60s into measurement, runs for 30s at medium rate.
+  prog-late:
+    start_time: 60
+    duration: 30
+    count: 1
+    rate: 5
+    prompt_tokens: 300
+    max_tokens: 128
+
+phases:
+  - name: program-aware
+    epp_config: configs/program-aware.yaml
+    metrics_subsystem: program_aware
+  - name: baseline-round-robin
+    epp_config: configs/round-robin.yaml
+    metrics_subsystem: round_robin
