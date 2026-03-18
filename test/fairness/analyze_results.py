@@ -1193,6 +1193,146 @@ def plot_prometheus_fairness_index(phase_metrics: dict[str, dict[str, float]], o
             f.write(f"{phase}\t{v:.4f}\n")
 
 
+def load_metrics_timeseries(results_dir: str, phases: list[tuple[str, str]]) -> dict[str, list[dict]]:
+    """Load real-time metrics timeseries for all phases.
+    
+    Returns {phase_name: [timeseries_records]}.
+    """
+    phase_timeseries = {}
+    for name, jsonl_path in phases:
+        timeseries_path = os.path.join(os.path.dirname(jsonl_path), "metrics_timeseries.jsonl")
+        if os.path.isfile(timeseries_path):
+            records = []
+            with open(timeseries_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            records.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            continue
+            phase_timeseries[name] = records
+        else:
+            phase_timeseries[name] = []
+    return phase_timeseries
+
+
+def plot_fairness_index_timeseries(phase_timeseries: dict[str, list[dict]], output_dir: str):
+    """Plot Jain's fairness index over time for each phase (line graph)."""
+    if not HAS_MATPLOTLIB:
+        return
+    
+    phase_names = list(phase_timeseries.keys())
+    if not phase_names or all(not ts for ts in phase_timeseries.values()):
+        return
+    
+    # Create one subplot per phase
+    fig, axes = plt.subplots(len(phase_names), 1, figsize=(14, 4 * len(phase_names)), squeeze=False)
+    
+    for ax_idx, phase in enumerate(phase_names):
+        ax = axes[ax_idx][0]
+        records = phase_timeseries[phase]
+        
+        if not records:
+            ax.text(0.5, 0.5, "No timeseries data available",
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title(f"{phase} — Fairness Index Over Time")
+            continue
+        
+        # Extract timestamps and fairness values
+        times = []
+        fairness_values = []
+        t0 = records[0]["timestamp"] if records else 0
+        
+        for rec in records:
+            if "error" not in rec and rec.get("fairness_index") is not None:
+                times.append(rec["timestamp"] - t0)
+                fairness_values.append(rec["fairness_index"])
+        
+        if times:
+            ax.plot(times, fairness_values, linewidth=2, color='steelblue', marker='o',
+                   markersize=3, alpha=0.7)
+            ax.axhline(y=1.0, color='red', linestyle='--', linewidth=1,
+                      label='Perfect fairness (1.0)', alpha=0.7)
+            ax.set_xlabel("Time (s)")
+            ax.set_ylabel("Jain's Fairness Index")
+            ax.set_title(f"{phase} — Fairness Index Over Time")
+            ax.set_ylim(0, 1.1)
+            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.3)
+        else:
+            ax.text(0.5, 0.5, "No valid fairness data",
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title(f"{phase} — Fairness Index Over Time")
+    
+    plt.tight_layout()
+    path = os.path.join(output_dir, "fairness_index_timeseries.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+    print(f"  Saved fairness index timeseries plot: {path}")
+    
+    # Save text data
+    txt_path = os.path.join(output_dir, "fairness_index_timeseries.txt")
+    with open(txt_path, "w") as f:
+        f.write("phase\ttime_s\tfairness_index\n")
+        for phase in phase_names:
+            records = phase_timeseries[phase]
+            if records:
+                t0 = records[0]["timestamp"]
+                for rec in records:
+                    if "error" not in rec and rec.get("fairness_index") is not None:
+                        f.write(f"{phase}\t{rec['timestamp'] - t0:.3f}\t{rec['fairness_index']:.6f}\n")
+
+
+def plot_fairness_index_overlay(phase_timeseries: dict[str, list[dict]], output_dir: str):
+    """Plot all phases' fairness index on a single overlaid graph."""
+    if not HAS_MATPLOTLIB:
+        return
+    
+    phase_names = list(phase_timeseries.keys())
+    if not phase_names or all(not ts for ts in phase_timeseries.values()):
+        return
+    
+    fig, ax = plt.subplots(figsize=(14, 6))
+    colors = plt.cm.tab10(np.linspace(0, 1, max(len(phase_names), 1)))
+    
+    has_data = False
+    for idx, phase in enumerate(phase_names):
+        records = phase_timeseries[phase]
+        if not records:
+            continue
+        
+        times = []
+        fairness_values = []
+        t0 = records[0]["timestamp"]
+        
+        for rec in records:
+            if "error" not in rec and rec.get("fairness_index") is not None:
+                times.append(rec["timestamp"] - t0)
+                fairness_values.append(rec["fairness_index"])
+        
+        if times:
+            ax.plot(times, fairness_values, linewidth=2, color=colors[idx],
+                   marker='o', markersize=2, alpha=0.7, label=phase)
+            has_data = True
+    
+    if has_data:
+        ax.axhline(y=1.0, color='red', linestyle='--', linewidth=1,
+                  label='Perfect fairness (1.0)', alpha=0.7)
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Jain's Fairness Index")
+        ax.set_title("Fairness Index Over Time — All Phases")
+        ax.set_ylim(0, 1.1)
+        ax.legend(fontsize=9, loc='best')
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        path = os.path.join(output_dir, "fairness_index_overlay.png")
+        plt.savefig(path, dpi=150)
+        plt.close()
+        print(f"  Saved fairness index overlay plot: {path}")
+
+
 def plot_prometheus_wait_time_histogram(phase_metrics: dict[str, dict[str, float]], output_dir: str, phase_subsystems: dict[str, str] | None = None):
     """Plot wait time distribution as a histogram using raw Prometheus bucket data.
 
@@ -1376,6 +1516,13 @@ def main():
         plot_prometheus_pick_latency_mean(phase_prom, comparison_dir, phase_subs)
         plot_prometheus_fairness_index(phase_prom, comparison_dir, phase_subs)
         plot_prometheus_wait_time_histogram(phase_prom, comparison_dir, phase_subs)
+
+    # Real-time fairness index timeseries plots
+    phase_timeseries = load_metrics_timeseries(args.results_dir, phases)
+    if any(ts for ts in phase_timeseries.values()):
+        print("\nGenerating fairness index timeseries plots...")
+        plot_fairness_index_timeseries(phase_timeseries, comparison_dir)
+        plot_fairness_index_overlay(phase_timeseries, comparison_dir)
 
     print("\nDone!")
 

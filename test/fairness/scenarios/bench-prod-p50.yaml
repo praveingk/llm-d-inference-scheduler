@@ -1,8 +1,9 @@
 # Generated scenario: production
 #
-# 20 background (6 heavy-med, 7 medium-med, 7 light-med) + 30 foreground.
-# BG total: 100 req/s | Capacity: 159.83 req/s (max-num-seqs=256)
-#   Phase 1 (t=0-600s, 30 fg): heavy-med=0.3, medium-med=0.35, light-med=0.35
+# 50 foreground programs across 2 phase(s).
+# Capacity: 162.27 req/s (max-num-seqs=256)
+#   Phase 1 (t=0-300s, 25 fg): heavy-med=0.3, medium-med=0.4, light-fast=0.3 | default-flow: rate=5.0 prompt=300 max=256
+#   Phase 2 (t=300-600s, 25 fg): medium-med=0.3, light-fast=0.4, heavy-slow=0.3 | default-flow: rate=3.0 prompt=150 max=64
 # Seed: 42 | Rates: fast=10 med=5 slow=1
 #
 
@@ -23,339 +24,375 @@ infra:
 test:
   duration: 600
   warmup: 60
-  concurrency: 40
+  concurrency: 38
   timeout: 600
 programs:
-  bg-thrm-000:
-    background: true
+  default-flow-p1:
+    start_time: 0
+    duration: 300
     count: 1
-    rate: 5
-    prompt_tokens: 600
-    max_tokens: 512
-  bg-thrm-001:
-    background: true
-    count: 1
-    rate: 5
-    prompt_tokens: 600
-    max_tokens: 512
-  bg-thrm-002:
-    background: true
-    count: 1
-    rate: 5
-    prompt_tokens: 600
-    max_tokens: 512
-  bg-thrm-003:
-    background: true
-    count: 1
-    rate: 5
-    prompt_tokens: 600
-    max_tokens: 512
-  bg-thrm-004:
-    background: true
-    count: 1
-    rate: 5
-    prompt_tokens: 600
-    max_tokens: 512
-  bg-thrm-005:
-    background: true
-    count: 1
-    rate: 5
-    prompt_tokens: 600
-    max_tokens: 512
-  bg-tmrm-006:
-    background: true
-    count: 1
-    rate: 5
+    rate: 5.0
     prompt_tokens: 300
     max_tokens: 256
-  bg-tmrm-007:
-    background: true
+    no_fairness_header: true
+  default-flow-p2:
+    start_time: 300
+    duration: 300
     count: 1
-    rate: 5
-    prompt_tokens: 300
-    max_tokens: 256
-  bg-tmrm-008:
-    background: true
-    count: 1
-    rate: 5
-    prompt_tokens: 300
-    max_tokens: 256
-  bg-tmrm-009:
-    background: true
-    count: 1
-    rate: 5
-    prompt_tokens: 300
-    max_tokens: 256
-  bg-tmrm-010:
-    background: true
-    count: 1
-    rate: 5
-    prompt_tokens: 300
-    max_tokens: 256
-  bg-tmrm-011:
-    background: true
-    count: 1
-    rate: 5
-    prompt_tokens: 300
-    max_tokens: 256
-  bg-tmrm-012:
-    background: true
-    count: 1
-    rate: 5
-    prompt_tokens: 300
-    max_tokens: 256
-  bg-tlrm-013:
-    background: true
-    count: 1
-    rate: 5
+    rate: 3.0
     prompt_tokens: 150
     max_tokens: 64
-  bg-tlrm-014:
-    background: true
-    count: 1
-    rate: 5
-    prompt_tokens: 150
-    max_tokens: 64
-  bg-tlrm-015:
-    background: true
-    count: 1
-    rate: 5
-    prompt_tokens: 150
-    max_tokens: 64
-  bg-tlrm-016:
-    background: true
-    count: 1
-    rate: 5
-    prompt_tokens: 150
-    max_tokens: 64
-  bg-tlrm-017:
-    background: true
-    count: 1
-    rate: 5
-    prompt_tokens: 150
-    max_tokens: 64
-  bg-tlrm-018:
-    background: true
-    count: 1
-    rate: 5
-    prompt_tokens: 150
-    max_tokens: 64
-  bg-tlrm-019:
-    background: true
-    count: 1
-    rate: 5
-    prompt_tokens: 150
-    max_tokens: 64
+    no_fairness_header: true
   fg-p1-thrm-000:
-    start_time: 57
+    start_time: 14
     duration: 223
     count: 1
     rate: 5
     prompt_tokens: 600
     max_tokens: 512
   fg-p1-thrm-001:
-    start_time: 281
+    start_time: 189
     duration: 66
     count: 1
     rate: 5
     prompt_tokens: 600
     max_tokens: 512
   fg-p1-thrm-002:
-    start_time: 114
-    duration: 122
+    start_time: 62
+    duration: 130
     count: 1
     rate: 5
     prompt_tokens: 600
     max_tokens: 512
   fg-p1-thrm-003:
-    start_time: 377
-    duration: 95
+    start_time: 35
+    duration: 117
     count: 1
     rate: 5
     prompt_tokens: 600
     max_tokens: 512
   fg-p1-thrm-004:
-    start_time: 89
-    duration: 86
+    start_time: 6
+    duration: 248
     count: 1
     rate: 5
     prompt_tokens: 600
     max_tokens: 512
   fg-p1-thrm-005:
-    start_time: 216
-    duration: 211
+    start_time: 11
+    duration: 233
     count: 1
     rate: 5
     prompt_tokens: 600
     max_tokens: 512
   fg-p1-thrm-006:
-    start_time: 30
-    duration: 68
+    start_time: 54
+    duration: 211
     count: 1
     rate: 5
     prompt_tokens: 600
     max_tokens: 512
   fg-p1-thrm-007:
-    start_time: 223
+    start_time: 7
+    duration: 68
+    count: 1
+    rate: 5
+    prompt_tokens: 600
+    max_tokens: 512
+  fg-p1-tmrm-008:
+    start_time: 55
     duration: 83
     count: 1
     rate: 5
-    prompt_tokens: 600
-    max_tokens: 512
-  fg-p1-thrm-008:
-    start_time: 258
-    duration: 119
-    count: 1
-    rate: 5
-    prompt_tokens: 600
-    max_tokens: 512
+    prompt_tokens: 300
+    max_tokens: 256
   fg-p1-tmrm-009:
-    start_time: 13
-    duration: 214
+    start_time: 129
+    duration: 119
     count: 1
     rate: 5
     prompt_tokens: 300
     max_tokens: 256
   fg-p1-tmrm-010:
-    start_time: 101
-    duration: 203
+    start_time: 3
+    duration: 214
     count: 1
     rate: 5
     prompt_tokens: 300
     max_tokens: 256
   fg-p1-tmrm-011:
-    start_time: 332
-    duration: 243
+    start_time: 25
+    duration: 203
     count: 1
     rate: 5
     prompt_tokens: 300
     max_tokens: 256
   fg-p1-tmrm-012:
-    start_time: 279
-    duration: 239
+    start_time: 41
+    duration: 243
     count: 1
     rate: 5
     prompt_tokens: 300
     max_tokens: 256
   fg-p1-tmrm-013:
-    start_time: 112
-    duration: 167
+    start_time: 34
+    duration: 239
     count: 1
     rate: 5
     prompt_tokens: 300
     max_tokens: 256
   fg-p1-tmrm-014:
-    start_time: 301
-    duration: 174
+    start_time: 56
+    duration: 167
     count: 1
     rate: 5
     prompt_tokens: 300
     max_tokens: 256
   fg-p1-tmrm-015:
-    start_time: 414
-    duration: 131
+    start_time: 75
+    duration: 174
     count: 1
     rate: 5
     prompt_tokens: 300
     max_tokens: 256
   fg-p1-tmrm-016:
-    start_time: 3
-    duration: 282
+    start_time: 1
+    duration: 131
     count: 1
     rate: 5
     prompt_tokens: 300
     max_tokens: 256
   fg-p1-tmrm-017:
-    start_time: 81
+    start_time: 10
     duration: 254
     count: 1
     rate: 5
     prompt_tokens: 300
     max_tokens: 256
-  fg-p1-tmrm-018:
-    start_time: 216
+  fg-p1-tlrf-018:
+    start_time: 27
     duration: 238
+    count: 1
+    rate: 10
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p1-tlrf-019:
+    start_time: 71
+    duration: 147
+    count: 1
+    rate: 10
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p1-tlrf-020:
+    start_time: 55
+    duration: 99
+    count: 1
+    rate: 10
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p1-tlrf-021:
+    start_time: 21
+    duration: 255
+    count: 1
+    rate: 10
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p1-tlrf-022:
+    start_time: 23
+    duration: 86
+    count: 1
+    rate: 10
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p1-tlrf-023:
+    start_time: 24
+    duration: 157
+    count: 1
+    rate: 10
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p1-tlrf-024:
+    start_time: 88
+    duration: 151
+    count: 1
+    rate: 10
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p2-tmrm-025:
+    start_time: 333
+    duration: 214
     count: 1
     rate: 5
     prompt_tokens: 300
     max_tokens: 256
-  fg-p1-tlrm-019:
-    start_time: 142
-    duration: 147
+  fg-p2-tmrm-026:
+    start_time: 302
+    duration: 266
     count: 1
     rate: 5
-    prompt_tokens: 150
-    max_tokens: 64
-  fg-p1-tlrm-020:
-    start_time: 110
-    duration: 99
+    prompt_tokens: 300
+    max_tokens: 256
+  fg-p2-tmrm-027:
+    start_time: 329
+    duration: 246
     count: 1
     rate: 5
-    prompt_tokens: 150
-    max_tokens: 64
-  fg-p1-tlrm-021:
-    start_time: 172
-    duration: 255
-    count: 1
-    rate: 5
-    prompt_tokens: 150
-    max_tokens: 64
-  fg-p1-tlrm-022:
-    start_time: 94
-    duration: 86
-    count: 1
-    rate: 5
-    prompt_tokens: 150
-    max_tokens: 64
-  fg-p1-tlrm-023:
-    start_time: 49
-    duration: 157
-    count: 1
-    rate: 5
-    prompt_tokens: 150
-    max_tokens: 64
-  fg-p1-tlrm-024:
-    start_time: 433
-    duration: 151
-    count: 1
-    rate: 5
-    prompt_tokens: 150
-    max_tokens: 64
-  fg-p1-tlrm-025:
-    start_time: 309
-    duration: 148
-    count: 1
-    rate: 5
-    prompt_tokens: 150
-    max_tokens: 64
-  fg-p1-tlrm-026:
-    start_time: 413
-    duration: 127
-    count: 1
-    rate: 5
-    prompt_tokens: 150
-    max_tokens: 64
-  fg-p1-tlrm-027:
-    start_time: 470
-    duration: 71
-    count: 1
-    rate: 5
-    prompt_tokens: 150
-    max_tokens: 64
-  fg-p1-tlrm-028:
-    start_time: 63
+    prompt_tokens: 300
+    max_tokens: 256
+  fg-p2-tmrm-028:
+    start_time: 315
     duration: 197
     count: 1
     rate: 5
-    prompt_tokens: 150
-    max_tokens: 64
-  fg-p1-tlrm-029:
-    start_time: 193
+    prompt_tokens: 300
+    max_tokens: 256
+  fg-p2-tmrm-029:
+    start_time: 303
     duration: 296
     count: 1
     rate: 5
+    prompt_tokens: 300
+    max_tokens: 256
+  fg-p2-tmrm-030:
+    start_time: 441
+    duration: 80
+    count: 1
+    rate: 5
+    prompt_tokens: 300
+    max_tokens: 256
+  fg-p2-tmrm-031:
+    start_time: 460
+    duration: 135
+    count: 1
+    rate: 5
+    prompt_tokens: 300
+    max_tokens: 256
+  fg-p2-tmrm-032:
+    start_time: 346
+    duration: 218
+    count: 1
+    rate: 5
+    prompt_tokens: 300
+    max_tokens: 256
+  fg-p2-tlrf-033:
+    start_time: 324
+    duration: 207
+    count: 1
+    rate: 10
     prompt_tokens: 150
     max_tokens: 64
+  fg-p2-tlrf-034:
+    start_time: 304
+    duration: 240
+    count: 1
+    rate: 10
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p2-tlrf-035:
+    start_time: 469
+    duration: 71
+    count: 1
+    rate: 10
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p2-tlrf-036:
+    start_time: 374
+    duration: 118
+    count: 1
+    rate: 10
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p2-tlrf-037:
+    start_time: 518
+    duration: 80
+    count: 1
+    rate: 10
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p2-tlrf-038:
+    start_time: 325
+    duration: 119
+    count: 1
+    rate: 10
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p2-tlrf-039:
+    start_time: 371
+    duration: 157
+    count: 1
+    rate: 10
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p2-tlrf-040:
+    start_time: 381
+    duration: 176
+    count: 1
+    rate: 10
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p2-tlrf-041:
+    start_time: 311
+    duration: 273
+    count: 1
+    rate: 10
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p2-tlrf-042:
+    start_time: 394
+    duration: 101
+    count: 1
+    rate: 10
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p2-thrs-043:
+    start_time: 353
+    duration: 150
+    count: 1
+    rate: 1
+    prompt_tokens: 600
+    max_tokens: 512
+  fg-p2-thrs-044:
+    start_time: 334
+    duration: 231
+    count: 1
+    rate: 1
+    prompt_tokens: 600
+    max_tokens: 512
+  fg-p2-thrs-045:
+    start_time: 359
+    duration: 239
+    count: 1
+    rate: 1
+    prompt_tokens: 600
+    max_tokens: 512
+  fg-p2-thrs-046:
+    start_time: 309
+    duration: 234
+    count: 1
+    rate: 1
+    prompt_tokens: 600
+    max_tokens: 512
+  fg-p2-thrs-047:
+    start_time: 381
+    duration: 215
+    count: 1
+    rate: 1
+    prompt_tokens: 600
+    max_tokens: 512
+  fg-p2-thrs-048:
+    start_time: 436
+    duration: 103
+    count: 1
+    rate: 1
+    prompt_tokens: 600
+    max_tokens: 512
+  fg-p2-thrs-049:
+    start_time: 315
+    duration: 246
+    count: 1
+    rate: 1
+    prompt_tokens: 600
+    max_tokens: 512
 phases:
 - name: program-aware
   epp_config: configs/program-aware.yaml

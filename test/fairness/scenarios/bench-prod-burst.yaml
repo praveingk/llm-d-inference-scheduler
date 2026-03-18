@@ -1,0 +1,239 @@
+# Generated scenario: production
+#
+# 25 foreground programs across 3 phase(s).
+# Capacity: 185.63 req/s (max-num-seqs=256)
+#   Phase 1 (t=0-150s, 5 fg): light-med=0.6, medium-med=0.4 | default-flow: rate=5.0 prompt=300 max=256
+#   Phase 2 (t=150-400s, 15 fg): heavy-fast=0.4, medium-fast=0.3, light-fast=0.3 | default-flow: rate=10.0 prompt=300 max=256
+#   Phase 3 (t=400-600s, 5 fg): light-slow=0.5, medium-slow=0.3, light-med=0.2 | default-flow: rate=3.0 prompt=150 max=64
+# Seed: 42 | Rates: fast=15.0 med=8.0 slow=2.0
+#
+
+name: bench-prod-p25
+model: meta-llama/Llama-3.1-8B-Instruct
+infra:
+  kind: false
+  namespace: default
+  vllm:
+    extra_args:
+    - --latency-calculator=per-token
+    - --prefill-overhead=6ms
+    - --prefill-time-per-token=17us
+    - --inter-token-latency=6ms
+    - --inter-token-latency-std-dev=1ms
+    - --max-num-seqs=256
+    - --max-model-len=4096
+test:
+  duration: 600
+  warmup: 60
+  concurrency: 50
+  timeout: 600
+programs:
+  default-flow-p1:
+    start_time: 0
+    duration: 150
+    count: 1
+    rate: 5.0
+    prompt_tokens: 300
+    max_tokens: 256
+    no_fairness_header: true
+  default-flow-p2:
+    start_time: 150
+    duration: 250
+    count: 1
+    rate: 10.0
+    prompt_tokens: 300
+    max_tokens: 256
+    no_fairness_header: true
+  default-flow-p3:
+    start_time: 400
+    duration: 200
+    count: 1
+    rate: 3.0
+    prompt_tokens: 150
+    max_tokens: 64
+    no_fairness_header: true
+  fg-p1-tlrm-000:
+    start_time: 1
+    duration: 141
+    count: 1
+    rate: 8.0
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p1-tlrm-001:
+    start_time: 35
+    duration: 63
+    count: 1
+    rate: 8.0
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p1-tlrm-002:
+    start_time: 14
+    duration: 91
+    count: 1
+    rate: 8.0
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p1-tmrm-003:
+    start_time: 13
+    duration: 77
+    count: 1
+    rate: 8.0
+    prompt_tokens: 300
+    max_tokens: 256
+  fg-p1-tmrm-004:
+    start_time: 4
+    duration: 146
+    count: 1
+    rate: 8.0
+    prompt_tokens: 300
+    max_tokens: 256
+  fg-p2-thrf-005:
+    start_time: 301
+    duration: 82
+    count: 1
+    rate: 15.0
+    prompt_tokens: 600
+    max_tokens: 512
+  fg-p2-thrf-006:
+    start_time: 154
+    duration: 168
+    count: 1
+    rate: 15.0
+    prompt_tokens: 600
+    max_tokens: 512
+  fg-p2-thrf-007:
+    start_time: 173
+    duration: 67
+    count: 1
+    rate: 15.0
+    prompt_tokens: 600
+    max_tokens: 512
+  fg-p2-thrf-008:
+    start_time: 209
+    duration: 115
+    count: 1
+    rate: 15.0
+    prompt_tokens: 600
+    max_tokens: 512
+  fg-p2-thrf-009:
+    start_time: 188
+    duration: 189
+    count: 1
+    rate: 15.0
+    prompt_tokens: 600
+    max_tokens: 512
+  fg-p2-thrf-010:
+    start_time: 293
+    duration: 66
+    count: 1
+    rate: 15.0
+    prompt_tokens: 600
+    max_tokens: 512
+  fg-p2-tmrf-011:
+    start_time: 289
+    duration: 110
+    count: 1
+    rate: 15.0
+    prompt_tokens: 300
+    max_tokens: 256
+  fg-p2-tmrf-012:
+    start_time: 178
+    duration: 167
+    count: 1
+    rate: 15.0
+    prompt_tokens: 300
+    max_tokens: 256
+  fg-p2-tmrf-013:
+    start_time: 225
+    duration: 174
+    count: 1
+    rate: 15.0
+    prompt_tokens: 300
+    max_tokens: 256
+  fg-p2-tmrf-014:
+    start_time: 253
+    duration: 131
+    count: 1
+    rate: 15.0
+    prompt_tokens: 300
+    max_tokens: 256
+  fg-p2-tlrf-015:
+    start_time: 190
+    duration: 61
+    count: 1
+    rate: 15.0
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p2-tlrf-016:
+    start_time: 156
+    duration: 238
+    count: 1
+    rate: 15.0
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p2-tlrf-017:
+    start_time: 185
+    duration: 147
+    count: 1
+    rate: 15.0
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p2-tlrf-018:
+    start_time: 205
+    duration: 99
+    count: 1
+    rate: 15.0
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p2-tlrf-019:
+    start_time: 163
+    duration: 146
+    count: 1
+    rate: 15.0
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p3-tlrs-020:
+    start_time: 448
+    duration: 83
+    count: 1
+    rate: 2.0
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p3-tlrs-021:
+    start_time: 445
+    duration: 84
+    count: 1
+    rate: 2.0
+    prompt_tokens: 150
+    max_tokens: 64
+  fg-p3-tmrs-022:
+    start_time: 438
+    duration: 148
+    count: 1
+    rate: 2.0
+    prompt_tokens: 300
+    max_tokens: 256
+  fg-p3-tmrs-023:
+    start_time: 405
+    duration: 127
+    count: 1
+    rate: 2.0
+    prompt_tokens: 300
+    max_tokens: 256
+  fg-p3-tlrm-024:
+    start_time: 417
+    duration: 177
+    count: 1
+    rate: 8.0
+    prompt_tokens: 150
+    max_tokens: 64
+phases:
+- name: program-aware
+  epp_config: configs/program-aware.yaml
+  metrics_subsystem: program_aware
+- name: program-aware-drr
+  epp_config: configs/program-aware-drr.yaml
+  metrics_subsystem: program_aware
+- name: round-robin
+  epp_config: configs/round-robin.yaml
+  metrics_subsystem: round_robin

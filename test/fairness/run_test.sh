@@ -246,13 +246,46 @@ tune_simulator() {
 run_loadgen() {
     local output_file="$1"
     local label="$2"
+    local phase_dir="$3"
+    local metrics_subsystem="$4"
 
     log "Starting $label load test ..."
+    
+    # Extract test duration from scenario
+    local duration
+    duration="$(yaml_get test.duration 180)"
+    local warmup
+    warmup="$(yaml_get test.warmup 30)"
+    local estimated_duration=$((duration + warmup))
+    
+    # Start real-time metrics scraper in background with 5x buffer for draining
+    local scraper_duration=$((estimated_duration * 5))
+    local metrics_timeseries="$phase_dir/metrics_timeseries.jsonl"
+    log "Starting real-time metrics scraper (estimated=${estimated_duration}s, max=${scraper_duration}s, subsystem=${metrics_subsystem}) ..."
+    python3 "$SCRIPT_DIR/scrape_metrics_realtime.py" \
+        --metrics-url "$METRICS_URL/metrics" \
+        --output "$metrics_timeseries" \
+        --duration "$scraper_duration" \
+        --subsystem "$metrics_subsystem" \
+        --interval 1.0 \
+        > "$phase_dir/scraper.log" 2>&1 &
+    local scraper_pid=$!
+    log "Metrics scraper started (PID $scraper_pid)"
+    
+    # Run load generator
     python3 "$SCRIPT_DIR/fairness_loadgen.py" \
         --scenario "$SCRIPT_DIR/$SCENARIO" \
         --gateway-url "$GATEWAY_URL" \
         --model "$MODEL" \
         --output "$output_file"
+    
+    # Stop scraper after load generator completes
+    if kill -0 "$scraper_pid" 2>/dev/null; then
+        log "Load generator complete. Stopping metrics scraper ..."
+        kill "$scraper_pid" 2>/dev/null || true
+        wait "$scraper_pid" 2>/dev/null || true
+    fi
+    
     log "$label load test complete."
 }
 
@@ -306,7 +339,7 @@ main() {
         log "========================================="
 
         switch_config "$epp_config" "$phase_name"
-        run_loadgen "$phase_dir/results.jsonl" "$phase_name"
+        run_loadgen "$phase_dir/results.jsonl" "$phase_name" "$phase_dir" "$metrics_subsystem"
         snapshot_metrics "$phase_dir/metrics_final.txt"
 
         # Brief pause between phases.
