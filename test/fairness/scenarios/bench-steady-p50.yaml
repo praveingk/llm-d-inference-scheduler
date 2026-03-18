@@ -1,0 +1,338 @@
+# Generated scenario: steady
+#
+# 50 identical background programs, uniform token profile.
+# Rate per program: 2.65 req/s | Total: 132.5 req/s
+# Capacity: 165.47 req/s (max-num-seqs=256) | Load: 80.07%
+# Tokens: 300 prompt / 256 max | Request time: 1.55s
+#
+
+name: bench-steady-p50
+model: meta-llama/Llama-3.1-8B-Instruct
+infra:
+  kind: false
+  namespace: default
+  vllm:
+    extra_args:
+    - --latency-calculator=per-token
+    - --prefill-overhead=6ms
+    - --prefill-time-per-token=17us
+    - --inter-token-latency=6ms
+    - --inter-token-latency-std-dev=1ms
+    - --max-num-seqs=256
+    - --max-model-len=4096
+test:
+  duration: 600
+  warmup: 60
+  concurrency: 40
+  timeout: 600
+programs:
+  prog-000:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-001:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-002:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-003:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-004:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-005:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-006:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-007:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-008:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-009:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-010:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-011:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-012:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-013:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-014:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-015:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-016:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-017:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-018:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-019:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-020:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-021:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-022:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-023:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-024:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-025:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-026:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-027:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-028:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-029:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-030:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-031:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-032:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-033:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-034:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-035:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-036:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-037:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-038:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-039:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-040:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-041:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-042:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-043:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-044:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-045:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-046:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-047:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-048:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+  prog-049:
+    background: true
+    count: 1
+    rate: 2.65
+    prompt_tokens: 300
+    max_tokens: 256
+phases:
+- name: program-aware
+  epp_config: configs/program-aware.yaml
+  metrics_subsystem: program_aware
+- name: program-aware-drr
+  epp_config: configs/program-aware-drr.yaml
+  metrics_subsystem: program_aware
+- name: round-robin
+  epp_config: configs/round-robin.yaml
+  metrics_subsystem: round_robin

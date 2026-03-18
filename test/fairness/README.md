@@ -11,6 +11,7 @@ test/fairness/
 ├── run_test.sh            # Orchestrator — deploys infra, runs phases, triggers analysis
 ├── fairness_loadgen.py    # Async load generator (one sender per program instance)
 ├── analyze_results.py     # Post-hoc analysis: latency tables, CDF/bar plots, fairness ratios
+├── generate_scenario.py   # Scenario generator for large-scale benchmarks
 ├── scenarios/             # Scenario YAML files defining workload profiles
 │   ├── stress-h100.yaml
 │   └── uniform-fairness.yaml
@@ -73,6 +74,37 @@ is not in `default`.
    - CDF and bar chart plots
    - Fairness ratio analysis (cross-program and cross-phase)
    - Throughput summary
+
+## Generating scenarios
+
+`generate_scenario.py` creates scenario YAMLs programmatically for large-scale
+benchmarks (50-100 programs, 10-30 min durations). It auto-computes
+`max-num-seqs`, per-program rates, concurrency, and warmup from the vllm-sim
+per-token latency model. All generated scenarios include the 3 standard strategy
+phases (program-aware EWMA, DRR, round-robin).
+
+Three scenario types are supported:
+
+```bash
+# Steady-state: N identical background programs, uniform token profile
+python3 generate_scenario.py steady \
+  --program-count 50 --duration 600 --load-level 0.8 --max-num-seqs 256 \
+  -o scenarios/bench-steady-p50.yaml
+
+# Waves: background residents + foreground programs arriving in waves
+python3 generate_scenario.py waves \
+  --program-count 60 --bg-count 10 --num-waves 4 --vary-tokens --max-num-seqs 256 \
+  -o scenarios/bench-waves-p60.yaml
+
+# Production mix: random bg+fg, varied token costs, randomized timing
+python3 generate_scenario.py production \
+  --program-count 50 --bg-fraction 0.4 --heavy-fraction 0.3 --seed 42 --max-num-seqs 256 \
+  -o scenarios/bench-prod-p50.yaml
+```
+
+Common options: `--duration`, `--warmup`, `--load-level`, `--prompt-tokens`,
+`--max-tokens`, `--max-num-seqs` (default: 256). Run
+`python3 generate_scenario.py <type> --help` for all options.
 
 ## Scenario YAML format
 
