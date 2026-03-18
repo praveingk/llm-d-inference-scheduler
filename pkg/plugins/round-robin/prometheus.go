@@ -63,6 +63,14 @@ var (
 			Buckets:   []float64{1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 5000},
 		},
 	)
+
+	fairnessIndex = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Subsystem: roundRobinSubsystem,
+			Name:      "jains_fairness_index",
+			Help:      metricsutil.HelpMsgWithStability("Jain's fairness index over EWMA wait times across active programs (1.0 = perfectly fair)", compbasemetrics.ALPHA),
+		},
+	)
 )
 
 // GetCollectors returns all Prometheus collectors for the round-robin plugin.
@@ -74,5 +82,6 @@ func GetCollectors() []prometheus.Collector {
 		inputTokensTotal,
 		outputTokensTotal,
 		pickLatencyUs,
+		fairnessIndex,
 	}
 }

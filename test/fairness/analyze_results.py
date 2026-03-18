@@ -745,6 +745,35 @@ def extract_global_histogram(metrics: dict[str, float], metric_name: str) -> tup
     return metrics.get(sum_key, 0.0), metrics.get(count_key, 0.0)
 
 
+def extract_global_gauge(metrics: dict[str, float], metric_name: str) -> float:
+    """Extract a single no-label gauge value. Returns 0.0 if not found."""
+    return metrics.get(metric_name, 0.0)
+
+
+def extract_histogram_buckets(metrics: dict[str, float], metric_name: str) -> dict[str, list[tuple[float, float]]]:
+    """Extract per-program histogram buckets.
+
+    Returns {program_id: [(le, cumulative_count), ...]} sorted by le.
+    Parses lines matching metric_name_bucket{program_id="...", le="..."}.
+    """
+    prefix = metric_name + "_bucket{"
+    result: dict[str, list[tuple[float, float]]] = {}
+    for key, val in metrics.items():
+        if not key.startswith(prefix):
+            continue
+        prog_match = re.search(r'program_id="([^"]+)"', key)
+        le_match = re.search(r'le="([^"]+)"', key)
+        if not prog_match or not le_match:
+            continue
+        prog = prog_match.group(1)
+        le_str = le_match.group(1)
+        le = float("inf") if le_str == "+Inf" else float(le_str)
+        result.setdefault(prog, []).append((le, val))
+    for prog in result:
+        result[prog].sort(key=lambda t: t[0])
+    return result
+
+
 def load_phase_subsystems(results_dir: str, phases: list[tuple[str, str]]) -> dict[str, str]:
     """Load metrics subsystem per phase from metrics_subsystem.txt.
 
@@ -1030,6 +1059,156 @@ def plot_prometheus_pick_latency_mean(phase_metrics: dict[str, dict[str, float]]
             f.write(f"{phase}\t{m:.2f}\n")
 
 
+def plot_prometheus_fairness_index(phase_metrics: dict[str, dict[str, float]], output_dir: str, phase_subsystems: dict[str, str] | None = None):
+    """Plot Jain's fairness index per phase as a bar chart."""
+    if not HAS_MATPLOTLIB:
+        return
+
+    if phase_subsystems is None:
+        phase_subsystems = {}
+
+    phase_names = list(phase_metrics.keys())
+    values = []
+    for phase in phase_names:
+        sub = phase_subsystems.get(phase, "program_aware")
+        values.append(extract_global_gauge(phase_metrics[phase], f"{sub}_jains_fairness_index"))
+
+    if all(v == 0 for v in values):
+        return
+
+    bar_colors = plt.cm.tab10(np.linspace(0, 1, max(len(phase_names), 1)))
+    fig, ax = plt.subplots(figsize=(max(6, len(phase_names) * 2), 5))
+    x = np.arange(len(phase_names))
+    ax.bar(x, values, color=bar_colors[:len(phase_names)], alpha=0.8)
+    ax.axhline(y=1.0, color="black", linestyle="--", linewidth=1, label="perfect fairness (1.0)")
+    ax.set_xlabel("Phase")
+    ax.set_ylabel("Jain's Fairness Index")
+    ax.set_title("Prometheus: Jain's Fairness Index (1.0 = perfectly fair)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(phase_names, rotation=15, ha="right", fontsize=9)
+    ax.set_ylim(0, 1.1)
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3, axis="y")
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, "prometheus_fairness_index.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+    print(f"  Saved Prometheus fairness index plot: {path}")
+
+    txt_path = os.path.join(output_dir, "prometheus_fairness_index.txt")
+    with open(txt_path, "w") as f:
+        f.write("phase\tjains_fairness_index\n")
+        for phase, v in zip(phase_names, values):
+            f.write(f"{phase}\t{v:.4f}\n")
+
+
+def plot_prometheus_wait_time_histogram(phase_metrics: dict[str, dict[str, float]], output_dir: str, phase_subsystems: dict[str, str] | None = None):
+    """Plot wait time distribution as a histogram using raw Prometheus bucket data.
+
+    One subplot per program per phase. X-axis = bucket upper bounds (ms),
+    Y-axis = per-bucket request count (diff of adjacent cumulative counts).
+    """
+    if not HAS_MATPLOTLIB:
+        return
+
+    if phase_subsystems is None:
+        phase_subsystems = {}
+
+    phase_names = list(phase_metrics.keys())
+
+    # Collect all bucket data per phase.
+    phase_buckets: dict[str, dict[str, list[tuple[float, float]]]] = {}
+    all_programs: set[str] = set()
+    for phase in phase_names:
+        sub = phase_subsystems.get(phase, "program_aware")
+        buckets = extract_histogram_buckets(phase_metrics[phase], f"{sub}_wait_time_milliseconds")
+        phase_buckets[phase] = buckets
+        all_programs.update(buckets.keys())
+
+    if not all_programs:
+        return
+
+    programs = sorted(all_programs)
+    n_phases = len(phase_names)
+    n_progs = len(programs)
+    colors = plt.cm.tab10(np.linspace(0, 1, max(n_progs, 1)))
+
+    fig, axes = plt.subplots(
+        n_phases, n_progs,
+        figsize=(max(5, n_progs * 4), max(4, n_phases * 3)),
+        squeeze=False,
+    )
+
+    for row, phase in enumerate(phase_names):
+        for col, prog in enumerate(programs):
+            ax = axes[row][col]
+            buckets = phase_buckets[phase].get(prog, [])
+
+            if not buckets:
+                ax.set_visible(False)
+                continue
+
+            # Convert cumulative counts to per-bucket counts.
+            les = [b[0] for b in buckets]
+            cumulative = [b[1] for b in buckets]
+            per_bucket = []
+            for i, (le, cum) in enumerate(zip(les, cumulative)):
+                prev = cumulative[i - 1] if i > 0 else 0
+                per_bucket.append(cum - prev)
+
+            # Build bar positions and widths from finite bucket edges.
+            finite_les = [le for le in les if le != float("inf")]
+            bar_lefts = [0.0] + finite_les[:-1] if finite_les else []
+            bar_widths = finite_les if finite_les else []
+
+            # Plot finite buckets as bars.
+            if bar_lefts:
+                ax.bar(
+                    bar_lefts,
+                    per_bucket[:len(bar_lefts)],
+                    width=bar_widths,
+                    align="edge",
+                    color=colors[col],
+                    alpha=0.75,
+                    edgecolor="white",
+                    linewidth=0.5,
+                )
+
+            # If there's an +Inf bucket with remaining count, annotate it.
+            if len(per_bucket) > len(bar_lefts) and per_bucket[-1] > 0:
+                ax.annotate(
+                    f"+Inf: {int(per_bucket[-1])}",
+                    xy=(1, 0.95), xycoords="axes fraction",
+                    ha="right", va="top", fontsize=7, color="red",
+                )
+
+            ax.set_title(f"{phase} / {prog}", fontsize=8)
+            ax.set_xlabel("Wait (ms)", fontsize=7)
+            ax.set_ylabel("Count", fontsize=7)
+            ax.tick_params(labelsize=7)
+            ax.grid(True, alpha=0.3, axis="y")
+
+    fig.suptitle("Prometheus: Queue Wait Time Histogram (per program)", fontsize=12)
+    plt.tight_layout()
+    path = os.path.join(output_dir, "prometheus_wait_time_histogram.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+    print(f"  Saved Prometheus wait time histogram: {path}")
+
+    txt_path = os.path.join(output_dir, "prometheus_wait_time_histogram.txt")
+    with open(txt_path, "w") as f:
+        f.write("phase\tprogram\tle_ms\tper_bucket_count\tcumulative_count\n")
+        for phase in phase_names:
+            for prog in programs:
+                buckets = phase_buckets[phase].get(prog, [])
+                cumulative = [b[1] for b in buckets]
+                for i, (le, cum) in enumerate(zip([b[0] for b in buckets], cumulative)):
+                    prev = cumulative[i - 1] if i > 0 else 0
+                    le_str = "+Inf" if le == float("inf") else f"{le:.1f}"
+                    f.write(f"{phase}\t{prog}\t{le_str}\t{cum - prev:.0f}\t{cum:.0f}\n")
+
+
 def save_summary_json(phase_groups: dict[str, dict[str, list[float]]], output_dir: str):
     """Save machine-readable summary as JSON."""
     all_programs = sorted(set(
@@ -1104,6 +1283,8 @@ def main():
         plot_prometheus_wait_time(phase_prom, comparison_dir, phase_subs)
         plot_prometheus_pick_latency_sum(phase_prom, comparison_dir, phase_subs)
         plot_prometheus_pick_latency_mean(phase_prom, comparison_dir, phase_subs)
+        plot_prometheus_fairness_index(phase_prom, comparison_dir, phase_subs)
+        plot_prometheus_wait_time_histogram(phase_prom, comparison_dir, phase_subs)
 
     print("\nDone!")
 

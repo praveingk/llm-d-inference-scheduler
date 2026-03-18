@@ -84,6 +84,7 @@ func (p *roundRobin) Pick(
 	start := time.Now()
 	defer func() {
 		pickLatencyUs.Observe(float64(time.Since(start).Microseconds()))
+		fairnessIndex.Set(p.computeFairnessIndex())
 	}()
 
 	if flowGroup == nil {
@@ -139,6 +140,26 @@ func (p *roundRobin) Pick(
 	// No non-empty queue was found.
 	c.lastSelected = nil
 	return nil, nil
+}
+
+// computeFairnessIndex calculates Jain's Fairness Index over EWMA wait times across active programs.
+func (p *roundRobin) computeFairnessIndex() float64 {
+	var sum, sumSq float64
+	var n int
+	p.programMetrics.Range(func(_, v any) bool {
+		m := v.(*ProgramMetrics)
+		if m.HasWaitData() {
+			w := m.AverageWaitTime()
+			sum += w
+			sumSq += w * w
+			n++
+		}
+		return true
+	})
+	if n < 2 || sumSq == 0 {
+		return 1.0
+	}
+	return (sum * sum) / (float64(n) * sumSq)
 }
 
 // getOrCreateMetrics returns the ProgramMetrics for the given program ID, creating it if needed.

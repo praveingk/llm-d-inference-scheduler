@@ -39,3 +39,8 @@ vendor
 
 # Build output
 /build
+
+# Python
+.venv/
+__pycache__/
+*.pyc
