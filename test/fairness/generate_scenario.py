@@ -12,7 +12,7 @@ Generated YAMLs are consumed by the existing run_test.sh + fairness_loadgen.py
 Examples:
   python3 generate_scenario.py steady -n 50 --duration 600 -o scenarios/bench-steady-p50.yaml
   python3 generate_scenario.py waves -n 60 --bg-count 10 --num-waves 4 -o scenarios/bench-waves.yaml
-  python3 generate_scenario.py production -n 50 --seed 42 -o scenarios/bench-prod.yaml
+  python3 generate_scenario.py production -n 50 --seed 42 --phase '0-300:15:heavy-fast=0.3,medium-med=0.4,light-fast=0.3' --phase '300-600:15:light-fast=0.5,medium-med=0.3,heavy-slow=0.2' -o scenarios/bench-prod.yaml
 """
 
 import argparse
@@ -342,12 +342,91 @@ def generate_waves(args):
 
 
 # ---------------------------------------------------------------------------
-# Scenario: production
+# Scenario: production — compound profiles & load phases
 # ---------------------------------------------------------------------------
 
-# Token profiles
-HEAVY_PROFILE = (600, 512)
-LIGHT_PROFILE = (150, 64)
+# Token tiers: (prompt_tokens, max_tokens)
+TOKEN_TIERS = {
+    "heavy":  (600, 512),
+    "medium": (300, 256),
+    "light":  (150, 64),
+}
+
+# Rate tiers: req/s (defaults, overridable via CLI)
+RATE_TIERS = {
+    "fast": 10,
+    "med":  5,
+    "slow": 1,
+}
+
+# All 9 valid compound profile names
+VALID_PROFILES = {
+    f"{t}-{r}" for t in TOKEN_TIERS for r in RATE_TIERS
+}
+
+# Short abbreviations for program names
+_TOKEN_SHORT = {"heavy": "th", "medium": "tm", "light": "tl"}
+_RATE_SHORT  = {"fast": "rf", "med": "rm", "slow": "rs"}
+
+
+def _parse_mix(mix_str):
+    """Parse 'profile=frac,profile=frac,...' into dict.
+
+    Validates profile names and that fractions sum to ~1.0.
+    """
+    parts = [p.strip() for p in mix_str.split(",") if p.strip()]
+    mix = {}
+    for part in parts:
+        if "=" not in part:
+            print(f"Error: invalid mix entry '{part}', expected 'profile=fraction'", file=sys.stderr)
+            sys.exit(1)
+        name, frac_str = part.split("=", 1)
+        name = name.strip()
+        if name not in VALID_PROFILES:
+            print(f"Error: unknown profile '{name}'. Valid profiles: {sorted(VALID_PROFILES)}", file=sys.stderr)
+            sys.exit(1)
+        mix[name] = float(frac_str)
+    total = sum(mix.values())
+    if abs(total - 1.0) > 0.01:
+        print(f"Error: mix fractions sum to {total}, expected ~1.0", file=sys.stderr)
+        sys.exit(1)
+    return mix
+
+
+def _parse_phase(phase_str, duration):
+    """Parse 'START-END:COUNT:profile=frac,...' into a phase dict.
+
+    Returns {"start": int, "end": int, "count": int, "mix": {...}}.
+    """
+    parts = phase_str.split(":", 2)
+    if len(parts) != 3:
+        print(f"Error: invalid phase spec '{phase_str}', expected 'START-END:COUNT:mix'", file=sys.stderr)
+        sys.exit(1)
+    time_part, count_str, mix_str = parts
+    if "-" not in time_part:
+        print(f"Error: invalid time range '{time_part}', expected 'START-END'", file=sys.stderr)
+        sys.exit(1)
+    start_str, end_str = time_part.split("-", 1)
+    start, end = int(start_str), int(end_str)
+    if end <= start:
+        print(f"Error: phase end ({end}) must be > start ({start})", file=sys.stderr)
+        sys.exit(1)
+    if end > duration:
+        print(f"Error: phase end ({end}) exceeds --duration ({duration})", file=sys.stderr)
+        sys.exit(1)
+    count = int(count_str)
+    mix = _parse_mix(mix_str)
+    return {"start": start, "end": end, "count": count, "mix": mix}
+
+
+def _mix_from_heavy_fraction(heavy_fraction):
+    """Derive a default profile mix from the legacy --heavy-fraction flag."""
+    remainder = 1.0 - heavy_fraction
+    return {
+        "heavy-med": heavy_fraction,
+        "medium-med": round(remainder * 0.5, 4),
+        "light-med": round(remainder - remainder * 0.5, 4),
+    }
 
 
 def generate_production(args):
@@ -359,14 +438,55 @@ def generate_production(args):
 
     rng = random.Random(seed)
 
+    # Build rate lookup from defaults + CLI overrides
+    rates = {
+        "fast": args.rate_fast,
+        "med":  args.rate_med,
+        "slow": args.rate_slow,
+    }
+
     bg_count = max(1, int(n * bg_fraction))
     fg_count = n - bg_count
-    bg_heavy_count = max(0, int(bg_count * heavy_fraction))
-    bg_light_count = bg_count - bg_heavy_count
 
-    # Compute max_num_seqs from a blended average
-    avg_prompt = int(HEAVY_PROFILE[0] * heavy_fraction + LIGHT_PROFILE[0] * (1 - heavy_fraction))
-    avg_max = int(HEAVY_PROFILE[1] * heavy_fraction + LIGHT_PROFILE[1] * (1 - heavy_fraction))
+    # --- Parse background mix ---
+    if args.bg_mix:
+        bg_mix = _parse_mix(args.bg_mix)
+    else:
+        bg_mix = _mix_from_heavy_fraction(heavy_fraction)
+
+    # --- Parse foreground phases ---
+    if args.phase:
+        phases = [_parse_phase(p, duration) for p in args.phase]
+        total_phase_fg = sum(p["count"] for p in phases)
+        if total_phase_fg != fg_count:
+            print(
+                f"Error: sum of phase counts ({total_phase_fg}) != "
+                f"fg program count ({fg_count} = {n} - {bg_count})",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    else:
+        # Single default phase spanning full duration
+        fg_mix = _mix_from_heavy_fraction(heavy_fraction)
+        phases = [{"start": 0, "end": duration, "count": fg_count, "mix": fg_mix}]
+
+    # --- Compute blended avg token profile for capacity estimation ---
+    all_mixes = [bg_mix] + [p["mix"] for p in phases]
+    all_counts = [bg_count] + [p["count"] for p in phases]
+    weighted_prompt, weighted_max, total_weight = 0.0, 0.0, 0.0
+    for mix, count in zip(all_mixes, all_counts):
+        for profile_name, frac in mix.items():
+            token_tier = profile_name.split("-")[0]
+            pt, mt = TOKEN_TIERS[token_tier]
+            w = frac * count
+            weighted_prompt += pt * w
+            weighted_max += mt * w
+            total_weight += w
+    if total_weight > 0:
+        avg_prompt = int(weighted_prompt / total_weight)
+        avg_max = int(weighted_max / total_weight)
+    else:
+        avg_prompt, avg_max = 300, 256
 
     if args.max_num_seqs:
         mns = args.max_num_seqs
@@ -374,107 +494,98 @@ def generate_production(args):
         peak_estimate = n * 1.2
         mns = auto_max_num_seqs(peak_estimate, args.load_level, avg_prompt, avg_max)
 
-    # Capacity based on blended profile
     capacity = estimate_capacity(mns, avg_prompt, avg_max)
-    target_total = capacity * args.load_level
 
-    # Rate budget: heavy programs get lower rate, light programs get higher rate
-    heavy_req_time = estimate_request_time(*HEAVY_PROFILE)
-    light_req_time = estimate_request_time(*LIGHT_PROFILE)
-    # Rate ratio: inversely proportional to request time
-    rate_ratio = heavy_req_time / light_req_time  # heavy/light > 1 means heavy is slower
-    # If we have H heavy and L light programs, total_rate = H * r_heavy + L * r_light
-    # r_heavy = r_light / rate_ratio
-    # target_total = H * (r_light / rate_ratio) + L * r_light
-    # target_total = r_light * (H / rate_ratio + L)
+    # --- Helper to distribute count across mix fractions ---
+    def _distribute(count, mix):
+        """Return list of (profile_name, per_profile_count) tuples."""
+        items = list(mix.items())
+        counts = []
+        assigned = 0
+        for i, (name, frac) in enumerate(items):
+            if i == len(items) - 1:
+                c = count - assigned  # remainder goes to last
+            else:
+                c = round(count * frac)
+            counts.append((name, c))
+            assigned += c
+        return counts
 
-    # Background rates
-    if bg_count > 0:
-        bg_budget = target_total * 0.5  # bg gets ~50% of budget
-        if bg_light_count + bg_heavy_count / rate_ratio > 0:
-            r_light_bg = bg_budget / (bg_light_count + bg_heavy_count / rate_ratio)
-        else:
-            r_light_bg = bg_budget / max(1, bg_count)
-        r_heavy_bg = r_light_bg / rate_ratio
-    else:
-        r_light_bg = 0
-        r_heavy_bg = 0
-
-    # Foreground rates
-    fg_budget = target_total * 0.5
-    fg_heavy_count = max(0, int(fg_count * heavy_fraction))
-    fg_light_count = fg_count - fg_heavy_count
-    if fg_count > 0:
-        # Not all fg programs active at once; assume ~60% overlap on average
-        overlap_factor = 0.6
-        effective_fg_light = fg_light_count * overlap_factor
-        effective_fg_heavy = fg_heavy_count * overlap_factor
-        denom = effective_fg_light + effective_fg_heavy / rate_ratio
-        if denom > 0:
-            r_light_fg = fg_budget / denom
-        else:
-            r_light_fg = fg_budget / max(1, fg_count)
-        r_heavy_fg = r_light_fg / rate_ratio
-    else:
-        r_light_fg = 0
-        r_heavy_fg = 0
-
-    warmup = args.warmup if args.warmup else auto_warmup(n, min(r_light_bg, r_light_fg) if r_light_bg > 0 else r_light_fg)
+    warmup = args.warmup if args.warmup else auto_warmup(n, 1.0)
     concurrency = auto_concurrency(n)
 
     programs = OrderedDict()
-    prog_idx = 0
+    bg_counter = 0
 
-    # Background heavy
-    for i in range(bg_heavy_count):
-        programs[_prog_name(prog_idx)] = OrderedDict([
-            ("background", True),
-            ("count", 1),
-            ("rate", _round2(r_heavy_bg)),
-            ("prompt_tokens", HEAVY_PROFILE[0]),
-            ("max_tokens", HEAVY_PROFILE[1]),
-        ])
-        prog_idx += 1
+    # --- Background programs ---
+    for profile_name, pcount in _distribute(bg_count, bg_mix):
+        token_tier, rate_tier = profile_name.split("-")
+        pt, mt = TOKEN_TIERS[token_tier]
+        rate = rates[rate_tier]
+        for _ in range(pcount):
+            name = f"bg-{_TOKEN_SHORT[token_tier]}{_RATE_SHORT[rate_tier]}-{bg_counter:03d}"
+            programs[name] = OrderedDict([
+                ("background", True),
+                ("count", 1),
+                ("rate", _round2(rate)),
+                ("prompt_tokens", pt),
+                ("max_tokens", mt),
+            ])
+            bg_counter += 1
 
-    # Background light
-    for i in range(bg_light_count):
-        programs[_prog_name(prog_idx)] = OrderedDict([
-            ("background", True),
-            ("count", 1),
-            ("rate", _round2(r_light_bg)),
-            ("prompt_tokens", LIGHT_PROFILE[0]),
-            ("max_tokens", LIGHT_PROFILE[1]),
-        ])
-        prog_idx += 1
+    # --- Foreground programs per phase ---
+    fg_counter = 0
+    phase_details = []
+    for phase_idx, phase in enumerate(phases, start=1):
+        p_start, p_end = phase["start"], phase["end"]
+        p_length = p_end - p_start
+        phase_fg_names = []
 
-    # Foreground programs
-    total_fg_rate = 0
-    for i in range(fg_count):
-        is_heavy = rng.random() < heavy_fraction
-        profile = HEAVY_PROFILE if is_heavy else LIGHT_PROFILE
-        rate = r_heavy_fg if is_heavy else r_light_fg
+        for profile_name, pcount in _distribute(phase["count"], phase["mix"]):
+            token_tier, rate_tier = profile_name.split("-")
+            pt, mt = TOKEN_TIERS[token_tier]
+            rate = rates[rate_tier]
 
-        start_time = rng.randint(0, max(1, int(duration * 0.7)))
-        prog_duration = rng.randint(120, 300)
-        # Clamp so program doesn't exceed measurement window
-        prog_duration = min(prog_duration, duration - start_time)
-        prog_duration = max(30, prog_duration)  # minimum 30s
+            for _ in range(pcount):
+                # Duration: random within [min(60, p_length), min(300, p_length)]
+                min_dur = min(60, p_length)
+                max_dur = min(300, p_length)
+                prog_duration = rng.randint(min_dur, max_dur)
 
-        programs[_prog_name(prog_idx)] = OrderedDict([
-            ("start_time", start_time),
-            ("duration", prog_duration),
-            ("count", 1),
-            ("rate", _round2(rate)),
-            ("prompt_tokens", profile[0]),
-            ("max_tokens", profile[1]),
-        ])
-        total_fg_rate += rate
-        prog_idx += 1
+                # Start time: random within [p_start, p_end - prog_duration]
+                latest_start = max(p_start, p_end - prog_duration)
+                start_time = rng.randint(p_start, latest_start)
 
-    # Summary stats
-    total_bg_rate = r_heavy_bg * bg_heavy_count + r_light_bg * bg_light_count
-    peak_total = total_bg_rate + total_fg_rate  # conservative (not all fg active simultaneously)
-    actual_load = peak_total / capacity if capacity > 0 else 0
+                # Clamp duration to not exceed phase window
+                prog_duration = min(prog_duration, p_end - start_time)
+                prog_duration = max(30, prog_duration)
+
+                name = f"fg-p{phase_idx}-{_TOKEN_SHORT[token_tier]}{_RATE_SHORT[rate_tier]}-{fg_counter:03d}"
+                programs[name] = OrderedDict([
+                    ("start_time", start_time),
+                    ("duration", prog_duration),
+                    ("count", 1),
+                    ("rate", _round2(rate)),
+                    ("prompt_tokens", pt),
+                    ("max_tokens", mt),
+                ])
+                phase_fg_names.append(name)
+                fg_counter += 1
+
+        phase_details.append((phase_idx, p_start, p_end, phase["count"], phase["mix"], phase_fg_names))
+
+    # --- Summary stats ---
+    total_bg_rate = sum(
+        p["rate"] * p.get("count", 1)
+        for p in programs.values()
+        if p.get("background", False)
+    )
+    total_fg_rate = sum(
+        p["rate"] * p.get("count", 1)
+        for p in programs.values()
+        if not p.get("background", False)
+    )
+    peak_total = total_bg_rate + total_fg_rate
 
     scenario = OrderedDict([
         ("name", args.name or f"bench-prod-p{n}"),
@@ -490,17 +601,24 @@ def generate_production(args):
         ("phases", STANDARD_PHASES),
     ])
 
-    comment = (
-        f"# Generated scenario: production\n"
-        f"#\n"
-        f"# {bg_count} background ({bg_heavy_count} heavy, {bg_light_count} light) + "
-        f"{fg_count} foreground ({fg_heavy_count} heavy, {fg_light_count} light).\n"
-        f"# BG rates: heavy={_round2(r_heavy_bg)} light={_round2(r_light_bg)} req/s | "
-        f"FG rates: heavy={_round2(r_heavy_fg)} light={_round2(r_light_fg)} req/s\n"
-        f"# Total BG: {_round2(total_bg_rate)} req/s | Capacity: {_round2(capacity)} req/s (max-num-seqs={mns})\n"
-        f"# Seed: {seed}\n"
-        f"#\n"
+    # --- Comment header ---
+    bg_breakdown = ", ".join(
+        f"{pcount} {pname}" for pname, pcount in _distribute(bg_count, bg_mix) if pcount > 0
     )
+    comment_lines = [
+        f"# Generated scenario: production",
+        f"#",
+        f"# {bg_count} background ({bg_breakdown}) + {fg_count} foreground.",
+        f"# BG total: {_round2(total_bg_rate)} req/s | Capacity: {_round2(capacity)} req/s (max-num-seqs={mns})",
+    ]
+    for pi, ps, pe, pc, pmix, _ in phase_details:
+        mix_str = ", ".join(f"{k}={v}" for k, v in pmix.items())
+        comment_lines.append(f"#   Phase {pi} (t={ps}-{pe}s, {pc} fg): {mix_str}")
+    comment_lines += [
+        f"# Seed: {seed} | Rates: fast={rates['fast']} med={rates['med']} slow={rates['slow']}",
+        f"#",
+    ]
+    comment = "\n".join(comment_lines) + "\n"
 
     return scenario, comment
 
@@ -558,9 +676,19 @@ def build_parser():
     prod_p.add_argument("--bg-fraction", type=float, default=0.4,
                         help="Fraction of programs that are background (default: 0.4)")
     prod_p.add_argument("--heavy-fraction", type=float, default=0.3,
-                        help="Fraction of programs with heavy token profile (default: 0.3)")
+                        help="Fraction used for default mix when --phase/--bg-mix omitted (default: 0.3)")
     prod_p.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility (default: 42)")
+    prod_p.add_argument("--phase", action="append", default=None,
+                        help="Foreground phase spec: 'START-END:COUNT:profile=frac,...' (repeatable)")
+    prod_p.add_argument("--bg-mix", type=str, default=None,
+                        help="Background profile distribution: 'profile=frac,profile=frac,...'")
+    prod_p.add_argument("--rate-fast", type=float, default=RATE_TIERS["fast"],
+                        help=f"req/s for 'fast' rate tier (default: {RATE_TIERS['fast']})")
+    prod_p.add_argument("--rate-med", type=float, default=RATE_TIERS["med"],
+                        help=f"req/s for 'med' rate tier (default: {RATE_TIERS['med']})")
+    prod_p.add_argument("--rate-slow", type=float, default=RATE_TIERS["slow"],
+                        help=f"req/s for 'slow' rate tier (default: {RATE_TIERS['slow']})")
 
     return parser
 

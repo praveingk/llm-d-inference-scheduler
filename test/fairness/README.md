@@ -96,11 +96,40 @@ python3 generate_scenario.py waves \
   --program-count 60 --bg-count 10 --num-waves 4 --vary-tokens --max-num-seqs 256 \
   -o scenarios/bench-waves-p60.yaml
 
-# Production mix: random bg+fg, varied token costs, randomized timing
+# Production mix: simple (auto mix, backward compatible)
 python3 generate_scenario.py production \
-  --program-count 50 --bg-fraction 0.4 --heavy-fraction 0.3 --seed 42 --max-num-seqs 256 \
-  -o scenarios/bench-prod-p50.yaml
+  -n 50 --bg-fraction 0.4 --heavy-fraction 0.3 --seed 42 \
+  -o scenarios/bench-prod-simple.yaml
+
+# Production mix: explicit phases with ramp-up pattern
+python3 generate_scenario.py production \
+  -n 60 --bg-fraction 0.3 --seed 42 \
+  --bg-mix 'heavy-slow=0.3,medium-med=0.5,light-fast=0.2' \
+  --phase '0-200:14:heavy-fast=0.4,medium-med=0.4,light-fast=0.2' \
+  --phase '200-400:16:medium-med=0.3,light-fast=0.5,light-med=0.2' \
+  --phase '400-600:12:light-fast=0.6,light-med=0.2,medium-slow=0.2' \
+  -o scenarios/bench-prod-ramp.yaml
+
+# Production mix: burst in the middle
+python3 generate_scenario.py production \
+  -n 50 --bg-fraction 0.4 --seed 42 \
+  --phase '0-150:5:light-med=0.6,medium-med=0.4' \
+  --phase '150-400:15:heavy-fast=0.4,medium-fast=0.3,light-fast=0.3' \
+  --phase '400-600:5:light-slow=0.5,medium-slow=0.3,light-med=0.2' \
+  -o scenarios/bench-prod-burst.yaml
+
+# Production mix: custom rate tiers
+python3 generate_scenario.py production \
+  -n 40 --bg-fraction 0.4 --seed 42 \
+  --rate-fast 15 --rate-med 8 --rate-slow 2 \
+  --phase '0-600:24:heavy-med=0.3,medium-med=0.4,light-fast=0.3' \
+  -o scenarios/bench-prod-custom-rates.yaml
 ```
+
+Production scenarios support 9 compound profiles (`{heavy,medium,light}-{fast,med,slow}`)
+combining 3 token tiers with 3 rate tiers. Use `--phase` to control foreground
+temporal patterns, `--bg-mix` for background distribution, and
+`--rate-fast/--rate-med/--rate-slow` to override rate tier values.
 
 Common options: `--duration`, `--warmup`, `--load-level`, `--prompt-tokens`,
 `--max-tokens`, `--max-num-seqs` (default: 256). Run
