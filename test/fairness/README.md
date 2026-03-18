@@ -95,7 +95,14 @@ The test harness now includes real-time tracking of Jain's fairness index throug
    - **Overlay graph**: Compares fairness trends across all phases on a single plot
    - Includes reference line at 1.0 (perfect fairness)
 
-3. **Automatic Integration**:
+3. **Per-Program Wait Time Charts** (NEW):
+   - **Individual program lifecycle analysis**: Shows how each program's average wait time evolved over the test phase
+   - **One chart per program**: Separate time-series visualization for each program instance
+   - **Saved per-phase**: Charts are organized in `results/<scenario>/<phase>/per-program/` directory
+   - **Automatic generation**: Created during analysis from the same `metrics_timeseries.jsonl` data
+   - Helps identify which programs experienced wait time spikes and when
+
+4. **Automatic Integration**:
    - Scraper starts automatically when `run_test.sh` begins each phase
    - Runs in parallel with the load generator
    - Analysis script automatically detects and plots timeseries data
@@ -105,6 +112,9 @@ The test harness now includes real-time tracking of Jain's fairness index throug
 For each phase, you'll now find:
 - `results/<phase>/metrics_timeseries.jsonl` - Raw timestamped metrics
 - `results/<phase>/scraper.log` - Scraper execution log
+- `results/<phase>/per-program/` - **Per-program wait time charts (NEW)**
+  - `<program_id>_wait_time.png` - Time-series chart for each program
+  - `<program_id>_wait_time.txt` - Tabular data for each program
 - `results/comparison/fairness_index_timeseries.png` - Per-phase line graphs
 - `results/comparison/fairness_index_timeseries.txt` - Tabular data
 - `results/comparison/fairness_index_overlay.png` - All phases overlaid
@@ -118,6 +128,10 @@ SCENARIO=scenarios/bench-steady-p50.yaml ./run_test.sh
 # After completion, view the fairness evolution plots
 open results/bench-steady-p50/comparison/fairness_index_timeseries.png
 open results/bench-steady-p50/comparison/fairness_index_overlay.png
+
+# View per-program wait time charts
+open results/bench-steady-p50/program-aware/per-program/prog-heavy-0_wait_time.png
+open results/bench-steady-p50/baseline/per-program/prog-heavy-0_wait_time.png
 ```
 
 ### Manual Scraper Usage
@@ -167,11 +181,12 @@ python3 generate_scenario.py production --seed 42 \
 
 # Production: burst in the middle with custom rate tiers
 python3 generate_scenario.py production --seed 42 \
-  --rate-fast 15 --rate-med 8 --rate-slow 2 \
-  --phase '0-150:5:light-med=0.6,medium-med=0.4|df:rate=5,prompt=300,max=256' \
-  --phase '150-400:15:heavy-fast=0.4,medium-fast=0.3,light-fast=0.3|df:rate=10,prompt=300,max=256' \
-  --phase '400-600:5:light-slow=0.5,medium-slow=0.3,light-med=0.2|df:rate=3,prompt=150,max=64' \
-  -o scenarios/bench-prod-burst.yaml
+  --rate-fast 8 --rate-med 4 --rate-slow 2 \
+  --max-num-seqs 128 \
+  --phase '0-60:20:heavy-fast=0.3,medium-fast=0.4,light-fast=0.3|df:rate=50,prompt=400,max=300' \
+  --phase '60-120:25:heavy-med=0.4,medium-med=0.3,light-med=0.3|df:rate=50,prompt=400,max=300' \
+  --phase '120-180:20:heavy-slow=0.2,medium-slow=0.5,light-slow=0.3|df:rate=50,prompt=400,max=300' \
+  -o scenarios/bench-prod-high-load.yaml
 ```
 
 Production scenarios use `--phase` flags (required, repeatable) to define foreground

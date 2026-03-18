@@ -1332,6 +1332,105 @@ def plot_fairness_index_overlay(phase_timeseries: dict[str, list[dict]], output_
         plt.close()
         print(f"  Saved fairness index overlay plot: {path}")
 
+def plot_per_program_wait_time(results_dir: str, phases: list[tuple[str, str]]):
+    """Plot per-program average wait time over time for each phase.
+    
+    Creates individual time-series charts for each program showing how their
+    average wait time evolved during the test phase. Charts are saved in
+    results/<scenario>/<phase>/per-program/ directory.
+    
+    Args:
+        results_dir: Base results directory (e.g., results/stress-h100)
+        phases: List of (phase_name, jsonl_path) tuples
+    """
+    if not HAS_MATPLOTLIB:
+        return
+    
+    print("\nGenerating per-program wait time charts...")
+    
+    for phase_name, jsonl_path in phases:
+        phase_dir = os.path.dirname(jsonl_path)
+        timeseries_path = os.path.join(phase_dir, "metrics_timeseries.jsonl")
+        
+        if not os.path.isfile(timeseries_path):
+            print(f"  {phase_name}: No metrics_timeseries.jsonl found, skipping")
+            continue
+        
+        # Load timeseries data
+        records = []
+        with open(timeseries_path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        
+        if not records:
+            print(f"  {phase_name}: No valid timeseries records, skipping")
+            continue
+        
+        # Extract all unique program IDs from avg_wait_time_ms across all records
+        all_programs = set()
+        for rec in records:
+            if "error" not in rec and "avg_wait_time_ms" in rec:
+                all_programs.update(rec["avg_wait_time_ms"].keys())
+        
+        if not all_programs:
+            print(f"  {phase_name}: No programs with wait time data, skipping")
+            continue
+        
+        # Create per-program output directory
+        per_program_dir = os.path.join(phase_dir, "per-program")
+        os.makedirs(per_program_dir, exist_ok=True)
+        
+        # Get start timestamp for relative time calculation
+        t0 = records[0]["timestamp"] if records else 0
+        
+        # Generate one chart per program
+        for program_id in sorted(all_programs):
+            # Extract timeseries data for this program
+            times = []
+            wait_times = []
+            
+            for rec in records:
+                if "error" not in rec and "avg_wait_time_ms" in rec:
+                    wait_time = rec["avg_wait_time_ms"].get(program_id)
+                    if wait_time is not None:
+                        times.append(rec["timestamp"] - t0)
+                        wait_times.append(wait_time)
+            
+            if not times:
+                continue
+            
+            # Create the plot
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(times, wait_times, linewidth=2, color='steelblue',
+                   marker='o', markersize=3, alpha=0.7)
+            ax.set_xlabel("Time (s)", fontsize=11)
+            ax.set_ylabel("Average Wait Time (ms)", fontsize=11)
+            ax.set_title(f"{program_id} — Average Wait Time Over Time", fontsize=13)
+            ax.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            
+            # Save plot
+            safe_program_id = program_id.replace('/', '_').replace(' ', '_')
+            plot_path = os.path.join(per_program_dir, f"{safe_program_id}_wait_time.png")
+            plt.savefig(plot_path, dpi=150)
+            plt.close()
+            
+            # Save text data
+            txt_path = os.path.join(per_program_dir, f"{safe_program_id}_wait_time.txt")
+            with open(txt_path, "w") as f:
+                f.write("time_s\tavg_wait_time_ms\n")
+                for t, wt in zip(times, wait_times):
+                    f.write(f"{t:.3f}\t{wt:.6f}\n")
+        
+        print(f"  {phase_name}: Generated {len(all_programs)} per-program charts in {per_program_dir}")
+
+
 
 def plot_prometheus_wait_time_histogram(phase_metrics: dict[str, dict[str, float]], output_dir: str, phase_subsystems: dict[str, str] | None = None):
     """Plot wait time distribution as a histogram using raw Prometheus bucket data.
@@ -1523,6 +1622,9 @@ def main():
         print("\nGenerating fairness index timeseries plots...")
         plot_fairness_index_timeseries(phase_timeseries, comparison_dir)
         plot_fairness_index_overlay(phase_timeseries, comparison_dir)
+    
+    # Per-program wait time charts
+    plot_per_program_wait_time(args.results_dir, phases)
 
     print("\nDone!")
 
