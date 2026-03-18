@@ -50,6 +50,7 @@ class ProgramInstance:
     background: bool = True
     start_offset: float = 0.0        # seconds after warmup ends (foreground only)
     active_duration: float | None = None  # None = full test duration (background)
+    no_fairness_header: bool = False  # skip x-gateway-inference-fairness-id header
 
 
 @dataclass
@@ -127,6 +128,8 @@ def expand_programs(programs_cfg: dict) -> list[ProgramInstance]:
             start_offset = float(cfg["start_time"])
             active_duration = float(cfg["duration"])
 
+        no_fairness_header = cfg.get("no_fairness_header", False)
+
         for i in range(count):
             fairness_id = name if count == 1 else f"{name}-{i}"
             instances.append(ProgramInstance(
@@ -137,6 +140,7 @@ def expand_programs(programs_cfg: dict) -> list[ProgramInstance]:
                 background=background,
                 start_offset=start_offset,
                 active_duration=active_duration,
+                no_fairness_header=no_fairness_header,
             ))
     return instances
 
@@ -157,10 +161,9 @@ async def send_request(
         "temperature": 0,
         "ignore_eos": True,
     }
-    headers = {
-        "Content-Type": "application/json",
-        "x-gateway-inference-fairness-id": instance.fairness_id,
-    }
+    headers = {"Content-Type": "application/json"}
+    if not instance.no_fairness_header:
+        headers["x-gateway-inference-fairness-id"] = instance.fairness_id
 
     sent_at = time.time()
     try:

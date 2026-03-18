@@ -4,7 +4,7 @@
 Supports three scenario types:
   steady      — all background, uniform programs
   waves       — background residents + foreground waves arriving over time
-  production  — mixed bg/fg with varied token costs and randomized timing
+  production  — phased foreground programs with optional default-flow baseline
 
 Generated YAMLs are consumed by the existing run_test.sh + fairness_loadgen.py
 + analyze_results.py pipeline with no modifications.
@@ -12,7 +12,7 @@ Generated YAMLs are consumed by the existing run_test.sh + fairness_loadgen.py
 Examples:
   python3 generate_scenario.py steady -n 50 --duration 600 -o scenarios/bench-steady-p50.yaml
   python3 generate_scenario.py waves -n 60 --bg-count 10 --num-waves 4 -o scenarios/bench-waves.yaml
-  python3 generate_scenario.py production -n 50 --seed 42 --phase '0-300:15:heavy-fast=0.3,medium-med=0.4,light-fast=0.3' --phase '300-600:15:light-fast=0.5,medium-med=0.3,heavy-slow=0.2' -o scenarios/bench-prod.yaml
+  python3 generate_scenario.py production --seed 42 --phase '0-300:15:heavy-fast=0.3,medium-med=0.4,light-fast=0.3|df:rate=5,prompt=300,max=256' --phase '300-600:15:light-fast=0.5,medium-med=0.3,heavy-slow=0.2' -o scenarios/bench-prod.yaml
 """
 
 import argparse
@@ -130,6 +130,9 @@ def _round2(x):
 # ---------------------------------------------------------------------------
 
 def generate_steady(args):
+    if not args.program_count:
+        print("Error: -n/--program-count is required for steady scenarios", file=sys.stderr)
+        sys.exit(1)
     n = args.program_count
     prompt_tokens = args.prompt_tokens
     max_tokens = args.max_tokens
@@ -203,6 +206,9 @@ def generate_steady(args):
 # ---------------------------------------------------------------------------
 
 def generate_waves(args):
+    if not args.program_count:
+        print("Error: -n/--program-count is required for waves scenarios", file=sys.stderr)
+        sys.exit(1)
     n = args.program_count
     bg_count = args.bg_count
     fg_count = n - bg_count
@@ -393,14 +399,50 @@ def _parse_mix(mix_str):
     return mix
 
 
-def _parse_phase(phase_str, duration):
-    """Parse 'START-END:COUNT:profile=frac,...' into a phase dict.
+def _parse_default_flow(df_str):
+    """Parse 'df:rate=R,prompt=P,max=M' into a dict.
 
-    Returns {"start": int, "end": int, "count": int, "mix": {...}}.
+    Returns {"rate": float, "prompt_tokens": int, "max_tokens": int}.
     """
-    parts = phase_str.split(":", 2)
+    if not df_str.startswith("df:"):
+        print(f"Error: invalid default-flow spec '{df_str}', expected 'df:rate=R,prompt=P,max=M'", file=sys.stderr)
+        sys.exit(1)
+    kv_str = df_str[3:]
+    kv = {}
+    for part in kv_str.split(","):
+        if "=" not in part:
+            print(f"Error: invalid default-flow entry '{part}', expected 'key=value'", file=sys.stderr)
+            sys.exit(1)
+        k, v = part.split("=", 1)
+        kv[k.strip()] = v.strip()
+    required = {"rate", "prompt", "max"}
+    missing = required - set(kv)
+    if missing:
+        print(f"Error: default-flow missing keys: {missing}. Expected 'df:rate=R,prompt=P,max=M'", file=sys.stderr)
+        sys.exit(1)
+    return {
+        "rate": float(kv["rate"]),
+        "prompt_tokens": int(kv["prompt"]),
+        "max_tokens": int(kv["max"]),
+    }
+
+
+def _parse_phase(phase_str, duration):
+    """Parse 'START-END:COUNT:profile=frac,...[|df:rate=R,prompt=P,max=M]' into a phase dict.
+
+    Returns {"start": int, "end": int, "count": int, "mix": {...}, "default_flow": {...} or None}.
+    """
+    # Split off optional default-flow pipe section
+    default_flow = None
+    if "|" in phase_str:
+        main_part, df_part = phase_str.split("|", 1)
+        default_flow = _parse_default_flow(df_part.strip())
+    else:
+        main_part = phase_str
+
+    parts = main_part.split(":", 2)
     if len(parts) != 3:
-        print(f"Error: invalid phase spec '{phase_str}', expected 'START-END:COUNT:mix'", file=sys.stderr)
+        print(f"Error: invalid phase spec '{main_part}', expected 'START-END:COUNT:mix'", file=sys.stderr)
         sys.exit(1)
     time_part, count_str, mix_str = parts
     if "-" not in time_part:
@@ -416,24 +458,11 @@ def _parse_phase(phase_str, duration):
         sys.exit(1)
     count = int(count_str)
     mix = _parse_mix(mix_str)
-    return {"start": start, "end": end, "count": count, "mix": mix}
-
-
-def _mix_from_heavy_fraction(heavy_fraction):
-    """Derive a default profile mix from the legacy --heavy-fraction flag."""
-    remainder = 1.0 - heavy_fraction
-    return {
-        "heavy-med": heavy_fraction,
-        "medium-med": round(remainder * 0.5, 4),
-        "light-med": round(remainder - remainder * 0.5, 4),
-    }
+    return {"start": start, "end": end, "count": count, "mix": mix, "default_flow": default_flow}
 
 
 def generate_production(args):
-    n = args.program_count
     duration = args.duration
-    bg_fraction = args.bg_fraction
-    heavy_fraction = args.heavy_fraction
     seed = args.seed
 
     rng = random.Random(seed)
@@ -445,56 +474,9 @@ def generate_production(args):
         "slow": args.rate_slow,
     }
 
-    bg_count = max(1, int(n * bg_fraction))
-    fg_count = n - bg_count
-
-    # --- Parse background mix ---
-    if args.bg_mix:
-        bg_mix = _parse_mix(args.bg_mix)
-    else:
-        bg_mix = _mix_from_heavy_fraction(heavy_fraction)
-
-    # --- Parse foreground phases ---
-    if args.phase:
-        phases = [_parse_phase(p, duration) for p in args.phase]
-        total_phase_fg = sum(p["count"] for p in phases)
-        if total_phase_fg != fg_count:
-            print(
-                f"Error: sum of phase counts ({total_phase_fg}) != "
-                f"fg program count ({fg_count} = {n} - {bg_count})",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-    else:
-        # Single default phase spanning full duration
-        fg_mix = _mix_from_heavy_fraction(heavy_fraction)
-        phases = [{"start": 0, "end": duration, "count": fg_count, "mix": fg_mix}]
-
-    # --- Compute blended avg token profile for capacity estimation ---
-    all_mixes = [bg_mix] + [p["mix"] for p in phases]
-    all_counts = [bg_count] + [p["count"] for p in phases]
-    weighted_prompt, weighted_max, total_weight = 0.0, 0.0, 0.0
-    for mix, count in zip(all_mixes, all_counts):
-        for profile_name, frac in mix.items():
-            token_tier = profile_name.split("-")[0]
-            pt, mt = TOKEN_TIERS[token_tier]
-            w = frac * count
-            weighted_prompt += pt * w
-            weighted_max += mt * w
-            total_weight += w
-    if total_weight > 0:
-        avg_prompt = int(weighted_prompt / total_weight)
-        avg_max = int(weighted_max / total_weight)
-    else:
-        avg_prompt, avg_max = 300, 256
-
-    if args.max_num_seqs:
-        mns = args.max_num_seqs
-    else:
-        peak_estimate = n * 1.2
-        mns = auto_max_num_seqs(peak_estimate, args.load_level, avg_prompt, avg_max)
-
-    capacity = estimate_capacity(mns, avg_prompt, avg_max)
+    # --- Parse phases (required) ---
+    phases = [_parse_phase(p, duration) for p in args.phase]
+    fg_count = sum(p["count"] for p in phases)
 
     # --- Helper to distribute count across mix fractions ---
     def _distribute(count, mix):
@@ -511,27 +493,59 @@ def generate_production(args):
             assigned += c
         return counts
 
-    warmup = args.warmup if args.warmup else auto_warmup(n, 1.0)
-    concurrency = auto_concurrency(n)
+    # --- Compute blended avg token profile for capacity estimation ---
+    weighted_prompt, weighted_max, total_weight = 0.0, 0.0, 0.0
+    for phase in phases:
+        for profile_name, frac in phase["mix"].items():
+            token_tier = profile_name.split("-")[0]
+            pt, mt = TOKEN_TIERS[token_tier]
+            w = frac * phase["count"]
+            weighted_prompt += pt * w
+            weighted_max += mt * w
+            total_weight += w
+        if phase["default_flow"]:
+            df = phase["default_flow"]
+            weighted_prompt += df["prompt_tokens"]
+            weighted_max += df["max_tokens"]
+            total_weight += 1
+    if total_weight > 0:
+        avg_prompt = int(weighted_prompt / total_weight)
+        avg_max = int(weighted_max / total_weight)
+    else:
+        avg_prompt, avg_max = 300, 256
+
+    total_programs = fg_count + sum(1 for p in phases if p["default_flow"])
+    if args.max_num_seqs:
+        mns = args.max_num_seqs
+    else:
+        peak_estimate = total_programs * 1.2
+        mns = auto_max_num_seqs(peak_estimate, args.load_level, avg_prompt, avg_max)
+
+    capacity = estimate_capacity(mns, avg_prompt, avg_max)
+
+    warmup = args.warmup if args.warmup else auto_warmup(total_programs, 1.0)
+    concurrency = auto_concurrency(total_programs)
 
     programs = OrderedDict()
-    bg_counter = 0
 
-    # --- Background programs ---
-    for profile_name, pcount in _distribute(bg_count, bg_mix):
-        token_tier, rate_tier = profile_name.split("-")
-        pt, mt = TOKEN_TIERS[token_tier]
-        rate = rates[rate_tier]
-        for _ in range(pcount):
-            name = f"bg-{_TOKEN_SHORT[token_tier]}{_RATE_SHORT[rate_tier]}-{bg_counter:03d}"
-            programs[name] = OrderedDict([
-                ("background", True),
-                ("count", 1),
-                ("rate", _round2(rate)),
-                ("prompt_tokens", pt),
-                ("max_tokens", mt),
-            ])
-            bg_counter += 1
+    # --- Default-flow programs (one per phase that has df) ---
+    df_phases = [(i, p) for i, p in enumerate(phases, start=1) if p["default_flow"]]
+    for phase_idx, phase in df_phases:
+        df = phase["default_flow"]
+        p_start, p_end = phase["start"], phase["end"]
+        if len(df_phases) == 1:
+            df_name = "default-flow"
+        else:
+            df_name = f"default-flow-p{phase_idx}"
+        programs[df_name] = OrderedDict([
+            ("start_time", p_start),
+            ("duration", p_end - p_start),
+            ("count", 1),
+            ("rate", _round2(df["rate"])),
+            ("prompt_tokens", df["prompt_tokens"]),
+            ("max_tokens", df["max_tokens"]),
+            ("no_fairness_header", True),
+        ])
 
     # --- Foreground programs per phase ---
     fg_counter = 0
@@ -572,23 +586,13 @@ def generate_production(args):
                 phase_fg_names.append(name)
                 fg_counter += 1
 
-        phase_details.append((phase_idx, p_start, p_end, phase["count"], phase["mix"], phase_fg_names))
+        phase_details.append((phase_idx, p_start, p_end, phase["count"], phase["mix"], phase["default_flow"]))
 
     # --- Summary stats ---
-    total_bg_rate = sum(
-        p["rate"] * p.get("count", 1)
-        for p in programs.values()
-        if p.get("background", False)
-    )
-    total_fg_rate = sum(
-        p["rate"] * p.get("count", 1)
-        for p in programs.values()
-        if not p.get("background", False)
-    )
-    peak_total = total_bg_rate + total_fg_rate
+    total_rate = sum(p["rate"] * p.get("count", 1) for p in programs.values())
 
     scenario = OrderedDict([
-        ("name", args.name or f"bench-prod-p{n}"),
+        ("name", args.name or f"bench-prod-p{fg_count}"),
         ("model", "meta-llama/Llama-3.1-8B-Instruct"),
         ("infra", _infra_block(mns)),
         ("test", OrderedDict([
@@ -602,18 +606,18 @@ def generate_production(args):
     ])
 
     # --- Comment header ---
-    bg_breakdown = ", ".join(
-        f"{pcount} {pname}" for pname, pcount in _distribute(bg_count, bg_mix) if pcount > 0
-    )
     comment_lines = [
         f"# Generated scenario: production",
         f"#",
-        f"# {bg_count} background ({bg_breakdown}) + {fg_count} foreground.",
-        f"# BG total: {_round2(total_bg_rate)} req/s | Capacity: {_round2(capacity)} req/s (max-num-seqs={mns})",
+        f"# {fg_count} foreground programs across {len(phases)} phase(s).",
+        f"# Capacity: {_round2(capacity)} req/s (max-num-seqs={mns})",
     ]
-    for pi, ps, pe, pc, pmix, _ in phase_details:
+    for pi, ps, pe, pc, pmix, pdf in phase_details:
         mix_str = ", ".join(f"{k}={v}" for k, v in pmix.items())
-        comment_lines.append(f"#   Phase {pi} (t={ps}-{pe}s, {pc} fg): {mix_str}")
+        line = f"#   Phase {pi} (t={ps}-{pe}s, {pc} fg): {mix_str}"
+        if pdf:
+            line += f" | default-flow: rate={pdf['rate']} prompt={pdf['prompt_tokens']} max={pdf['max_tokens']}"
+        comment_lines.append(line)
     comment_lines += [
         f"# Seed: {seed} | Rates: fast={rates['fast']} med={rates['med']} slow={rates['slow']}",
         f"#",
@@ -635,8 +639,8 @@ def build_parser():
 
     # Common arguments
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("-n", "--program-count", type=int, required=True,
-                        help="Total number of programs")
+    common.add_argument("-n", "--program-count", type=int, default=None,
+                        help="Total number of programs (required for steady/waves)")
     common.add_argument("--duration", type=int, default=600,
                         help="Measurement duration in seconds (default: 600)")
     common.add_argument("--warmup", type=int, default=None,
@@ -672,17 +676,11 @@ def build_parser():
 
     # production
     prod_p = sub.add_parser("production", parents=[common],
-                            help="Mixed bg+fg with varied token costs")
-    prod_p.add_argument("--bg-fraction", type=float, default=0.4,
-                        help="Fraction of programs that are background (default: 0.4)")
-    prod_p.add_argument("--heavy-fraction", type=float, default=0.3,
-                        help="Fraction used for default mix when --phase/--bg-mix omitted (default: 0.3)")
+                            help="Phased foreground programs with optional default-flow")
     prod_p.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility (default: 42)")
-    prod_p.add_argument("--phase", action="append", default=None,
-                        help="Foreground phase spec: 'START-END:COUNT:profile=frac,...' (repeatable)")
-    prod_p.add_argument("--bg-mix", type=str, default=None,
-                        help="Background profile distribution: 'profile=frac,profile=frac,...'")
+    prod_p.add_argument("--phase", action="append", required=True,
+                        help="Phase spec: 'START-END:COUNT:mix[|df:rate=R,prompt=P,max=M]' (repeatable)")
     prod_p.add_argument("--rate-fast", type=float, default=RATE_TIERS["fast"],
                         help=f"req/s for 'fast' rate tier (default: {RATE_TIERS['fast']})")
     prod_p.add_argument("--rate-med", type=float, default=RATE_TIERS["med"],
@@ -710,7 +708,8 @@ def main():
     if args.output:
         output_path = args.output
     else:
-        output_path = f"scenarios/bench-{args.scenario_type}-p{args.program_count}.yaml"
+        n = args.program_count or len(scenario["programs"])
+        output_path = f"scenarios/bench-{args.scenario_type}-p{n}.yaml"
 
     # Ensure output directory exists
     output_dir = os.path.dirname(output_path)
@@ -730,13 +729,16 @@ def main():
     infra_args = scenario["infra"]["vllm"]["extra_args"]
     mns = [a for a in infra_args if a.startswith("--max-num-seqs=")][0].split("=")[1]
 
-    bg_progs = sum(1 for p in programs.values() if p.get("background", False))
-    fg_progs = len(programs) - bg_progs
+    df_progs = sum(1 for name in programs if name.startswith("default-flow"))
+    fg_progs = len(programs) - df_progs
     total_rate = sum(p["rate"] * p.get("count", 1) for p in programs.values())
 
     print(f"Scenario: {scenario['name']}")
     print(f"  Type: {args.scenario_type}")
-    print(f"  Programs: {len(programs)} ({bg_progs} bg, {fg_progs} fg)")
+    if df_progs:
+        print(f"  Programs: {len(programs)} ({fg_progs} fg, {df_progs} default-flow)")
+    else:
+        print(f"  Programs: {len(programs)} fg")
     print(f"  Total rate: {_round2(total_rate)} req/s")
     print(f"  max-num-seqs: {mns}")
     print(f"  Duration: {test['duration']}s | Warmup: {test['warmup']}s | Concurrency: {test['concurrency']}")
