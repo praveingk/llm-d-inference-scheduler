@@ -922,6 +922,35 @@ def plot_prometheus_tokens(phase_metrics: dict[str, dict[str, float]], output_di
                 f.write(f"{phase}\t{p}\t{input_tokens.get(p, 0):.0f}\t{output_tokens.get(p, 0):.0f}\n")
 
 
+def interpolate_percentile_from_buckets(buckets: list[tuple[float, float]], p: float) -> float:
+    """Interpolate a percentile value from Prometheus histogram bucket data.
+
+    buckets: sorted list of (le, cumulative_count), last entry may be +Inf.
+    p: percentile in [0, 100].
+    Returns interpolated value in the same unit as the bucket bounds (ms),
+    or 0.0 if data is insufficient.
+    """
+    if not buckets:
+        return 0.0
+    total = buckets[-1][1]
+    if total <= 0:
+        return 0.0
+    target = (p / 100.0) * total
+    prev_le, prev_cum = 0.0, 0.0
+    for le, cum in buckets:
+        if le == float("inf"):
+            break
+        if cum >= target:
+            if cum == prev_cum:
+                return prev_le
+            frac = (target - prev_cum) / (cum - prev_cum)
+            return prev_le + frac * (le - prev_le)
+        prev_le, prev_cum = le, cum
+    # target beyond last finite bucket — return last finite le
+    finite = [(le, cum) for le, cum in buckets if le != float("inf")]
+    return finite[-1][0] if finite else 0.0
+
+
 def plot_prometheus_wait_time(phase_metrics: dict[str, dict[str, float]], output_dir: str, phase_subsystems: dict[str, str] | None = None):
     """Plot average wait time per program, per phase."""
     if not HAS_MATPLOTLIB:
@@ -973,6 +1002,67 @@ def plot_prometheus_wait_time(phase_metrics: dict[str, dict[str, float]], output
             avgs = extract_histogram_avg(phase_metrics[phase], f"{sub}_wait_time_milliseconds")
             for p in all_programs:
                 f.write(f"{phase}\t{p}\t{avgs.get(p, 0):.2f}\n")
+
+
+def plot_prometheus_wait_time_percentiles(phase_metrics: dict[str, dict[str, float]], output_dir: str, phase_subsystems: dict[str, str] | None = None):
+    """Plot interpolated P50/P95/P99 wait time per program, per phase (3 subplots)."""
+    if not HAS_MATPLOTLIB:
+        return
+
+    if phase_subsystems is None:
+        phase_subsystems = {}
+
+    phase_names = list(phase_metrics.keys())
+    all_programs = sorted(set(
+        prog
+        for phase, m in phase_metrics.items()
+        for prog in extract_histogram_buckets(m, f"{phase_subsystems.get(phase, 'program_aware')}_wait_time_milliseconds")
+    ))
+    if not all_programs:
+        return
+
+    percentiles = [("P50", 50.0), ("P95", 95.0), ("P99", 99.0)]
+    n_phases = len(phase_names)
+    phase_colors = plt.cm.tab10(np.linspace(0, 1, max(n_phases, 1)))
+
+    fig, axes = plt.subplots(1, 3, figsize=(max(15, len(all_programs) * n_phases * 0.6 + 4), 6), squeeze=False)
+    x = np.arange(len(all_programs))
+    width = 0.8 / n_phases
+
+    for col, (label, pct) in enumerate(percentiles):
+        ax = axes[0][col]
+        for p_idx, phase in enumerate(phase_names):
+            sub = phase_subsystems.get(phase, "program_aware")
+            buckets_all = extract_histogram_buckets(phase_metrics[phase], f"{sub}_wait_time_milliseconds")
+            vals = [interpolate_percentile_from_buckets(buckets_all.get(p, []), pct) for p in all_programs]
+            offset = (p_idx - n_phases / 2 + 0.5) * width
+            ax.bar(x + offset, vals, width, label=phase, color=phase_colors[p_idx], alpha=0.8)
+        ax.set_xlabel("Program")
+        ax.set_ylabel("Wait Time (ms)")
+        ax.set_title(label)
+        ax.set_xticks(x)
+        ax.set_xticklabels(all_programs, rotation=25, ha="right", fontsize=8)
+        ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3, axis="y")
+
+    fig.suptitle("Prometheus: Queue Wait Time Percentiles (interpolated)", fontsize=13)
+    plt.tight_layout()
+    path = os.path.join(output_dir, "prometheus_wait_time_percentiles.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+    print(f"  Saved Prometheus wait time percentiles plot: {path}")
+
+    txt_path = os.path.join(output_dir, "prometheus_wait_time_percentiles.txt")
+    with open(txt_path, "w") as f:
+        f.write("phase\tprogram\tp50_ms\tp95_ms\tp99_ms\n")
+        for phase in phase_names:
+            sub = phase_subsystems.get(phase, "program_aware")
+            buckets_all = extract_histogram_buckets(phase_metrics[phase], f"{sub}_wait_time_milliseconds")
+            for p in all_programs:
+                p50 = interpolate_percentile_from_buckets(buckets_all.get(p, []), 50.0)
+                p95 = interpolate_percentile_from_buckets(buckets_all.get(p, []), 95.0)
+                p99 = interpolate_percentile_from_buckets(buckets_all.get(p, []), 99.0)
+                f.write(f"{phase}\t{p}\t{p50:.2f}\t{p95:.2f}\t{p99:.2f}\n")
 
 
 def plot_prometheus_pick_latency_sum(phase_metrics: dict[str, dict[str, float]], output_dir: str, phase_subsystems: dict[str, str] | None = None):
@@ -1160,7 +1250,7 @@ def plot_prometheus_wait_time_histogram(phase_metrics: dict[str, dict[str, float
             # Build bar positions and widths from finite bucket edges.
             finite_les = [le for le in les if le != float("inf")]
             bar_lefts = [0.0] + finite_les[:-1] if finite_les else []
-            bar_widths = finite_les if finite_les else []
+            bar_widths = [r - l for l, r in zip(bar_lefts, finite_les)] if finite_les else []
 
             # Plot finite buckets as bars.
             if bar_lefts:
@@ -1281,6 +1371,7 @@ def main():
         plot_prometheus_requests_dispatched(phase_prom, comparison_dir, phase_subs)
         plot_prometheus_tokens(phase_prom, comparison_dir, phase_subs)
         plot_prometheus_wait_time(phase_prom, comparison_dir, phase_subs)
+        plot_prometheus_wait_time_percentiles(phase_prom, comparison_dir, phase_subs)
         plot_prometheus_pick_latency_sum(phase_prom, comparison_dir, phase_subs)
         plot_prometheus_pick_latency_mean(phase_prom, comparison_dir, phase_subs)
         plot_prometheus_fairness_index(phase_prom, comparison_dir, phase_subs)
