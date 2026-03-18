@@ -1430,6 +1430,137 @@ def plot_per_program_wait_time(results_dir: str, phases: list[tuple[str, str]]):
         
         print(f"  {phase_name}: Generated {len(all_programs)} per-program charts in {per_program_dir}")
 
+def plot_per_program_wait_time_overlay(results_dir: str, phases: list[tuple[str, str]]):
+    """Plot overlay of all programs' average wait time over time for each phase.
+    
+    Creates a single chart per phase showing all programs overlaid, allowing
+    easy comparison of how different programs' wait times evolved. Charts are
+    saved in results/<scenario>/<phase>/ directory.
+    
+    Args:
+        results_dir: Base results directory (e.g., results/stress-h100)
+        phases: List of (phase_name, jsonl_path) tuples
+    """
+    if not HAS_MATPLOTLIB:
+        return
+    
+    print("\nGenerating per-program wait time overlay charts...")
+    
+    for phase_name, jsonl_path in phases:
+        phase_dir = os.path.dirname(jsonl_path)
+        timeseries_path = os.path.join(phase_dir, "metrics_timeseries.jsonl")
+        
+        if not os.path.isfile(timeseries_path):
+            print(f"  {phase_name}: No metrics_timeseries.jsonl found, skipping")
+            continue
+        
+        # Load timeseries data
+        records = []
+        with open(timeseries_path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        
+        if not records:
+            print(f"  {phase_name}: No valid timeseries records, skipping")
+            continue
+        
+        # Extract all unique program IDs from avg_wait_time_ms across all records
+        all_programs = set()
+        for rec in records:
+            if "error" not in rec and "avg_wait_time_ms" in rec:
+                all_programs.update(rec["avg_wait_time_ms"].keys())
+        
+        if not all_programs:
+            print(f"  {phase_name}: No programs with wait time data, skipping")
+            continue
+        
+        # Get start timestamp for relative time calculation
+        t0 = records[0]["timestamp"] if records else 0
+        
+        # Collect data for all programs
+        program_data = {}
+        for program_id in sorted(all_programs):
+            times = []
+            wait_times = []
+            
+            for rec in records:
+                if "error" not in rec and "avg_wait_time_ms" in rec:
+                    wait_time = rec["avg_wait_time_ms"].get(program_id)
+                    if wait_time is not None:
+                        times.append(rec["timestamp"] - t0)
+                        wait_times.append(wait_time)
+            
+            if times:
+                program_data[program_id] = (times, wait_times)
+        
+        if not program_data:
+            print(f"  {phase_name}: No program data to plot, skipping")
+            continue
+        
+        # Create overlay plot
+        fig, ax = plt.subplots(figsize=(14, 8))
+        
+        # Use a colormap for distinct colors
+        colors = plt.cm.tab20(np.linspace(0, 1, len(program_data)))
+        
+        for idx, (program_id, (times, wait_times)) in enumerate(sorted(program_data.items())):
+            ax.plot(times, wait_times, linewidth=1.5, 
+                   marker='o', markersize=2, alpha=0.7,
+                   label=program_id, color=colors[idx])
+        
+        ax.set_xlabel("Time (s)", fontsize=11)
+        ax.set_ylabel("Average Wait Time (ms)", fontsize=11)
+        ax.set_title(f"{phase_name} — All Programs Wait Time Over Time", fontsize=13)
+        ax.grid(True, alpha=0.3)
+        
+        # Place legend outside plot area
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', 
+                 fontsize=8, framealpha=0.9)
+        
+        plt.tight_layout()
+        
+        # Save plot
+        plot_path = os.path.join(phase_dir, "per_program_wait_time_overlay.png")
+        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        # Save text data
+        txt_path = os.path.join(phase_dir, "per_program_wait_time_overlay.txt")
+        with open(txt_path, "w") as f:
+            # Write header
+            f.write("time_s")
+            for program_id in sorted(program_data.keys()):
+                safe_id = program_id.replace('\t', ' ')
+                f.write(f"\t{safe_id}")
+            f.write("\n")
+            
+            # Collect all unique timestamps
+            all_times = sorted(set(t for times, _ in program_data.values() for t in times))
+            
+            # Write data rows
+            for t in all_times:
+                f.write(f"{t:.3f}")
+                for program_id in sorted(program_data.keys()):
+                    times, wait_times = program_data[program_id]
+                    # Find wait time at this timestamp
+                    wt = None
+                    for i, time_val in enumerate(times):
+                        if abs(time_val - t) < 0.01:  # Match within 10ms
+                            wt = wait_times[i]
+                            break
+                    if wt is not None:
+                        f.write(f"\t{wt:.6f}")
+                    else:
+                        f.write("\t")
+                f.write("\n")
+        
+        print(f"  {phase_name}: Generated overlay chart with {len(program_data)} programs in {phase_dir}")
+
 
 
 def plot_prometheus_wait_time_histogram(phase_metrics: dict[str, dict[str, float]], output_dir: str, phase_subsystems: dict[str, str] | None = None):
@@ -1625,6 +1756,7 @@ def main():
     
     # Per-program wait time charts
     plot_per_program_wait_time(args.results_dir, phases)
+    plot_per_program_wait_time_overlay(args.results_dir, phases)
 
     print("\nDone!")
 

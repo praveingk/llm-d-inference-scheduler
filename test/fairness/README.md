@@ -98,7 +98,8 @@ The test harness now includes real-time tracking of Jain's fairness index throug
 3. **Per-Program Wait Time Charts** (NEW):
    - **Individual program lifecycle analysis**: Shows how each program's average wait time evolved over the test phase
    - **One chart per program**: Separate time-series visualization for each program instance
-   - **Saved per-phase**: Charts are organized in `results/<scenario>/<phase>/per-program/` directory
+   - **Overlay chart**: Single chart showing all programs overlaid for easy comparison
+   - **Saved per-phase**: Individual charts in `results/<scenario>/<phase>/per-program/`, overlay in `results/<scenario>/<phase>/`
    - **Automatic generation**: Created during analysis from the same `metrics_timeseries.jsonl` data
    - Helps identify which programs experienced wait time spikes and when
 
@@ -112,7 +113,8 @@ The test harness now includes real-time tracking of Jain's fairness index throug
 For each phase, you'll now find:
 - `results/<phase>/metrics_timeseries.jsonl` - Raw timestamped metrics
 - `results/<phase>/scraper.log` - Scraper execution log
-- `results/<phase>/per-program/` - **Per-program wait time charts (NEW)**
+- `results/<phase>/per_program_wait_time_overlay.png` - **All programs overlaid on one chart (NEW)**
+- `results/<phase>/per-program/` - **Individual per-program wait time charts (NEW)**
   - `<program_id>_wait_time.png` - Time-series chart for each program
   - `<program_id>_wait_time.txt` - Tabular data for each program
 - `results/comparison/fairness_index_timeseries.png` - Per-phase line graphs
