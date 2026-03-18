@@ -196,6 +196,24 @@ that phase. 9 compound profiles (`{heavy,medium,light}-{fast,med,slow}`) combine
 3 token tiers with 3 rate tiers. Override rate tier values with
 `--rate-fast/--rate-med/--rate-slow`.
 
+### Program Randomization
+
+The generator randomizes program start times and durations within each phase window
+to create realistic, staggered workload patterns:
+
+- **Duration randomization**: Programs get random durations scaled to the phase length
+  - Minimum: `max(20s, phase_length / 3)`
+  - Maximum: `min(300s, phase_length)`
+  - Example: 60s phase → durations between 20-60s
+  - Example: 200s phase → durations between 66-200s
+
+- **Start time randomization**: Programs start at random times ensuring they finish before phase ends
+  - Calculated as: `random(phase_start, phase_end - program_duration)`
+  - Creates natural overlap and competition for resources
+
+**For best randomization results**, use phase windows of 120s or longer. Shorter phases
+(60s) still work but have less variation since programs must fit within the window.
+
 Common options: `--duration`, `--warmup`, `--load-level`, `--prompt-tokens`,
 `--max-tokens`, `--max-num-seqs` (default: 256). Run
 `python3 generate_scenario.py <type> --help` for all options.

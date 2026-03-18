@@ -561,8 +561,10 @@ def generate_production(args):
             rate = rates[rate_tier]
 
             for _ in range(pcount):
-                # Duration: random within [min(60, p_length), min(300, p_length)]
-                min_dur = min(60, p_length)
+                # Duration: scale minimum with phase length for better randomization
+                # For short phases (e.g., 60s), allow shorter durations (20-60s)
+                # For longer phases, use traditional 60-300s range
+                min_dur = max(20, min(60, p_length // 3))
                 max_dur = min(300, p_length)
                 prog_duration = rng.randint(min_dur, max_dur)
 
