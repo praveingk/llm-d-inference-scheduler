@@ -28,9 +28,7 @@ func (p *roundRobin) Consumes() map[string]any {
 func (p *roundRobin) PrepareRequestData(ctx context.Context, request *scheduling.LLMRequest, _ []scheduling.Endpoint) error {
 	programID := request.Headers[fairnessIDHeader]
 	if programID == "" {
-		log.FromContext(ctx).V(logutil.DEBUG).Info("No fairness ID header found, skipping round-robin metrics update",
-			"requestId", request.RequestId)
-		return nil
+		programID = defaultFairnessID
 	}
 
 	metrics := p.getOrCreateMetrics(programID)
@@ -51,7 +49,7 @@ func (p *roundRobin) PrepareRequestData(ctx context.Context, request *scheduling
 func (p *roundRobin) PreRequest(ctx context.Context, request *scheduling.LLMRequest, _ *scheduling.SchedulingResult) {
 	programID := request.Headers[fairnessIDHeader]
 	if programID == "" {
-		return
+		programID = defaultFairnessID
 	}
 
 	metrics := p.getOrCreateMetrics(programID)
@@ -63,6 +61,7 @@ func (p *roundRobin) PreRequest(ctx context.Context, request *scheduling.LLMRequ
 		waitMs := float64(time.Since(enqueueTime).Milliseconds())
 		metrics.RecordWaitTime(waitMs)
 		waitTimeMs.WithLabelValues(programID).Observe(waitMs)
+		ewmaWaitTimeMs.WithLabelValues(programID).Set(metrics.AverageWaitTime())
 
 		log.FromContext(ctx).V(logutil.TRACE).Info("PreRequest: recorded wait time",
 			"requestId", request.RequestId, "programId", programID,
@@ -78,13 +77,12 @@ func (p *roundRobin) ResponseComplete(ctx context.Context, request *scheduling.L
 		return
 	}
 	programID := request.Headers[fairnessIDHeader]
+	if programID == "" {
+		programID = defaultFairnessID
+	}
 
 	// Cleanup per-request timestamp regardless of program ID presence.
 	p.requestTimestamps.Delete(request.RequestId)
-
-	if programID == "" {
-		return
-	}
 
 	if response != nil {
 		metrics := p.getOrCreateMetrics(programID)

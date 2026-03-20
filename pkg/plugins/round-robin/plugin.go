@@ -19,6 +19,11 @@ const (
 
 	// fairnessIDHeader is the standard header used to identify the program.
 	fairnessIDHeader = "x-gateway-inference-fairness-id"
+
+	// defaultFairnessID is the flow key assigned by the upstream framework when
+	// no x-gateway-inference-fairness-id header is present on the request.
+	// Matches the constant in sigs.k8s.io/gateway-api-inference-extension/pkg/epp/handlers/request.go.
+	defaultFairnessID = "default-flow"
 )
 
 // Compile-time interface assertions.
