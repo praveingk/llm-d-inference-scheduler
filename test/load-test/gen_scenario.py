@@ -204,12 +204,13 @@ def generate(cfg: dict, profiles: Dict[str, dict], seed: int) -> dict:
         counter[profile_name] = idx + 1
 
         programs[name] = {
-            "total_requests":  p["total_requests"],
-            "concurrency":     p["concurrency"],
-            "prompt_tokens":   p["prompt_tokens"],
-            "max_tokens":      p["max_tokens"],
-            "start_time":      int(t_start),
-            "request_timeout": p["request_timeout"],
+            "total_requests":    p["total_requests"],
+            "concurrency":       p["concurrency"],
+            "prompt_tokens":     p["prompt_tokens"],
+            "max_tokens":        p["max_tokens"],
+            "start_time":        int(t_start),
+            "request_timeout":   p["request_timeout"],
+            "no_fairness_header": p.get("no_fairness_header", False),
         }
 
     return {

@@ -101,7 +101,7 @@ def group_latencies_by_program(records: List[dict]) -> Dict[str, List[float]]:
 # ---------------------------------------------------------------------------
 
 def plot_latency(phases: List[str], results_dir: str, out_path: str):
-    # Collect p50/p99 per (phase, program).
+    # Collect p50/p95/p99 per (phase, program).
     phase_data = {}
     all_programs = []
     for phase in phases:
@@ -110,6 +110,7 @@ def plot_latency(phases: List[str], results_dir: str, out_path: str):
         phase_data[phase] = {
             pid: {
                 "p50": percentile(lats, 50),
+                "p95": percentile(lats, 95),
                 "p99": percentile(lats, 99),
             }
             for pid, lats in groups.items()
@@ -126,11 +127,11 @@ def plot_latency(phases: List[str], results_dir: str, out_path: str):
     n_programs   = len(all_programs)
     n_phases     = len(phases)
 
-    # Two groups (p50, p99) side by side, within each group bars per phase.
-    fig, axes = plt.subplots(1, 2, figsize=(max(10, n_programs * n_phases * 0.8 + 2), 5), sharey=False)
+    # Three rows (p50, p95, p99) stacked vertically.
+    fig, axes = plt.subplots(3, 1, figsize=(max(10, n_programs * n_phases * 0.8 + 2), 4 * 3), sharey=False)
     colors = plt.cm.tab10.colors
 
-    for ax_idx, pct_label in enumerate(["p50", "p99"]):
+    for ax_idx, pct_label in enumerate(["p50", "p95", "p99"]):
         ax = axes[ax_idx]
         x  = range(n_programs)
         bar_w = 0.8 / max(n_phases, 1)
@@ -211,7 +212,7 @@ def plot_wait_time_phases(phases: List[str], results_dir: str, out_path: str):
         return
 
     colors = plt.cm.tab10.colors
-    fig, axes = plt.subplots(n, 1, figsize=(10, 4 * n), squeeze=False)
+    fig, axes = plt.subplots(n, 1, figsize=(10, 5 * n), squeeze=False)
     any_data = False
 
     for i, phase in enumerate(phases):
@@ -239,7 +240,7 @@ def plot_wait_time_phases(phases: List[str], results_dir: str, out_path: str):
         ax.set_title(phase, fontsize=9)
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("EWMA Wait Time (ms)")
-        ax.legend(fontsize=7)
+        ax.legend(fontsize=7, loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=4)
         ax.grid(alpha=0.3)
 
     if not any_data:
