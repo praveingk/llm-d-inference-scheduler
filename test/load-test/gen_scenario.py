@@ -2,11 +2,45 @@
 """
 Scenario generator for test/load-test.
 
-Edit PROGRAM_PROFILES and SCENARIO_CONFIG below, then run:
+Reads an input YAML that defines program profiles and a scenario config,
+then generates a full scenario YAML consumable by loadgen.py / run_test.sh.
 
-    python3 gen_scenario.py                          # prints to stdout
-    python3 gen_scenario.py -o scenarios/my-test.yaml
-    python3 gen_scenario.py --seed 42 -o scenarios/my-test.yaml
+Usage:
+    python3 gen_scenario.py -i scenario-configs/starvation-test.yaml
+    python3 gen_scenario.py -i scenario-configs/starvation-test.yaml -o scenarios/starvation-test.yaml
+    python3 gen_scenario.py -i scenario-configs/starvation-test.yaml --seed 42 -o scenarios/out.yaml
+
+    # Backward compat (uses built-in defaults):
+    python3 gen_scenario.py -o scenarios/production-mix.yaml
+
+Input YAML structure:
+
+    profiles:
+      aggressive:
+        prompt_tokens: 600
+        max_tokens: 512
+        concurrency: 30
+        total_requests: 300
+        request_timeout: 120
+
+    scenario:
+      name: starvation-test
+      model: meta-llama/Llama-3.1-8B-Instruct
+      max_num_seqs: 16
+      window: 60
+      spread: 1
+      total_programs: 2
+      warmup:
+        total_requests: 0
+        concurrency: 4
+        prompt_tokens: 128
+        max_tokens: 64
+      programs:
+        - profile: aggressive
+          ratio: 0.5
+        - profile: polite
+          ratio: 0.5
+          window: [30, 60]   # optional per-entry arrival window
 
 Programs arrive with Poisson-spaced start times across a configurable window.
 Each program sends exactly total_requests as fast as concurrency allows.
@@ -23,15 +57,10 @@ import yaml
 
 
 # ---------------------------------------------------------------------------
-# *** PROGRAM PROFILES — edit to add/change profiles ***
-#
-# concurrency controls sender pipelining:
-#   low (1-2)  → near-sequential, polite sender
-#   medium     → moderate pipelining
-#   high       → aggressive, keeps EPP queue full
+# Built-in defaults (used when no -i input YAML is provided)
 # ---------------------------------------------------------------------------
 
-PROGRAM_PROFILES: Dict[str, dict] = {
+_DEFAULT_PROFILES: Dict[str, dict] = {
     "heavy-aggressive": {
         "prompt_tokens":   600,
         "max_tokens":      512,
@@ -83,36 +112,19 @@ PROGRAM_PROFILES: Dict[str, dict] = {
     },
 }
 
-
-# ---------------------------------------------------------------------------
-# *** SCENARIO CONFIG — edit to define the workload ***
-# ---------------------------------------------------------------------------
-
-SCENARIO_CONFIG = {
+_DEFAULT_SCENARIO = {
     "name":  "production-mix",
     "model": "meta-llama/Llama-3.1-8B-Instruct",
-
-    # Warmup before measurement window.
     "warmup": {
         "total_requests": 0,
         "concurrency":    4,
         "prompt_tokens":  128,
         "max_tokens":     64,
     },
-
-    # Window for spreading program start times (seconds).
     "window": 60,
-
-    # Fraction of window over which start times are distributed.
     "spread": 1,
-
-    # Total number of sender programs (scale knob).
     "total_programs": 100,
-
-    # vllm-sim concurrency limit (written into extra_args directly).
     "max_num_seqs": 64,
-
-    # Program mix by profile — ratios must sum to 1.0.
     "programs": [
         {"profile": "heavy-aggressive", "ratio": 0.3},
         {"profile": "medium-normal",    "ratio": 0.5},
@@ -134,6 +146,8 @@ def poisson_start_times(n: int, window_start: float, window_end: float,
     if n <= 0:
         return []
     span = window_end - window_start
+    if span <= 0:
+        return [round(window_start)] * n
     gap  = span / n
     times = []
     for i in range(n):
@@ -150,22 +164,23 @@ def poisson_start_times(n: int, window_start: float, window_end: float,
 # ---------------------------------------------------------------------------
 
 def distribute_programs(n: int, mix: List[dict],
-                        rng: random.Random) -> List[str]:
+                        rng: random.Random) -> List[dict]:
     """
-    Return a list of n profile names drawn according to ratio fractions.
+    Return a list of n entries, each a dict with 'profile' and 'window' (if present).
+    Entries are drawn according to ratio fractions.
     Uses round-then-assign-remainder to guarantee exactly n entries.
     """
-    profiles: List[str] = []
+    result: List[dict] = []
     remainder = n
     # Sort largest ratio first for stable assignment.
     items = sorted(mix, key=lambda x: -x["ratio"])
     for i, entry in enumerate(items):
         count = remainder if i == len(items) - 1 else round(entry["ratio"] * n)
         count = max(0, min(count, remainder))
-        profiles.extend([entry["profile"]] * count)
+        result.extend([entry] * count)
         remainder -= count
-    rng.shuffle(profiles)
-    return profiles
+    rng.shuffle(result)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -184,24 +199,41 @@ def generate(cfg: dict, profiles: Dict[str, dict], seed: int) -> dict:
     for entry in cfg["programs"]:
         pname = entry["profile"]
         if pname not in profiles:
-            raise ValueError(f"Unknown profile '{pname}'. Add it to PROGRAM_PROFILES.")
+            raise ValueError(f"Unknown profile '{pname}'. Define it in the profiles section.")
 
-    # Expand total_programs by ratios.
-    profile_list = distribute_programs(total_progs, cfg["programs"], rng)
+    # Expand total_programs by ratios.  Each element carries the original
+    # program entry (with optional per-entry window).
+    assigned = distribute_programs(total_progs, cfg["programs"], rng)
 
-    # Generate Poisson start times across [0, window * spread].
-    spread_end   = window * spread
-    start_times  = poisson_start_times(total_progs, 0, spread_end, rng)
+    # Group programs by their window range, generate start times per group,
+    # then zip back together.
+    global_window = [0, window * spread]
+
+    # Group by window range to call poisson_start_times per group.
+    from collections import defaultdict
+    groups: Dict[tuple, List[int]] = defaultdict(list)  # window_tuple -> [indices]
+    for idx, entry in enumerate(assigned):
+        win = entry.get("window", global_window)
+        win_key = (win[0], win[1])
+        groups[win_key].append(idx)
+
+    start_time_by_idx: Dict[int, float] = {}
+    for win_key, indices in groups.items():
+        times = poisson_start_times(len(indices), win_key[0], win_key[1], rng)
+        for i, t in zip(indices, times):
+            start_time_by_idx[i] = t
 
     programs: Dict[str, dict] = {}
     counter: Dict[str, int] = {}
 
-    for profile_name, t_start in zip(profile_list, start_times):
+    for idx, entry in enumerate(assigned):
+        profile_name = entry["profile"]
         p = profiles[profile_name]
+        t_start = start_time_by_idx[idx]
 
-        idx  = counter.get(profile_name, 0)
-        name = f"fg-{profile_name}-{idx:03d}"
-        counter[profile_name] = idx + 1
+        pidx = counter.get(profile_name, 0)
+        name = f"fg-{profile_name}-{pidx:03d}"
+        counter[profile_name] = pidx + 1
 
         programs[name] = {
             "total_requests":    p["total_requests"],
@@ -273,16 +305,62 @@ def dump_scenario(scenario: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Input YAML loader
+# ---------------------------------------------------------------------------
+
+def load_input_yaml(path: str) -> tuple:
+    """Load an input YAML and return (profiles, scenario_config)."""
+    with open(path) as f:
+        data = yaml.safe_load(f)
+
+    profiles = data.get("profiles", {})
+    scenario = data.get("scenario", {})
+
+    if not profiles:
+        raise ValueError(f"Input YAML '{path}' missing 'profiles' section.")
+    if not scenario:
+        raise ValueError(f"Input YAML '{path}' missing 'scenario' section.")
+
+    # Validate required scenario fields.
+    required = ["name", "model", "total_programs", "max_num_seqs", "programs"]
+    for key in required:
+        if key not in scenario:
+            raise ValueError(f"Input YAML scenario missing required field '{key}'.")
+
+    # Apply defaults for optional fields.
+    scenario.setdefault("window", 60)
+    scenario.setdefault("spread", 1)
+    scenario.setdefault("warmup", {
+        "total_requests": 0,
+        "concurrency": 4,
+        "prompt_tokens": 128,
+        "max_tokens": 64,
+    })
+
+    return profiles, scenario
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate a load-test scenario YAML")
-    parser.add_argument("-o", "--output", default=None, help="Output file (default: stdout)")
-    parser.add_argument("-s", "--seed", type=int, default=42,  help="Random seed (default: 42)")
+    parser.add_argument("-i", "--input", default=None,
+                        help="Input YAML with profiles and scenario config")
+    parser.add_argument("-o", "--output", default=None,
+                        help="Output file (default: stdout)")
+    parser.add_argument("-s", "--seed", type=int, default=42,
+                        help="Random seed (default: 42)")
     args = parser.parse_args()
 
-    result = generate(SCENARIO_CONFIG, PROGRAM_PROFILES, seed=args.seed)
+    if args.input:
+        profiles, scenario_cfg = load_input_yaml(args.input)
+    else:
+        profiles     = _DEFAULT_PROFILES
+        scenario_cfg = _DEFAULT_SCENARIO
+
+    result = generate(scenario_cfg, profiles, seed=args.seed)
     text   = dump_scenario(result)
 
     if args.output:

@@ -1,0 +1,36 @@
+# Default-flow impact test.
+# Fairness question: How does the scheduler treat the default-flow
+# bucket vs identified programs when workloads are identical?
+#
+# 5 identified programs (each gets its own flow) vs 5 anonymous
+# programs (all merge into "default-flow"). Same workload profile.
+# Tests whether the merged default-flow queue gets disproportionate
+# or insufficient service.
+
+profiles:
+  identified:
+    prompt_tokens: 300
+    max_tokens: 256
+    concurrency: 8
+    total_requests: 200
+    request_timeout: 60
+  anonymous:
+    prompt_tokens: 300
+    max_tokens: 256
+    concurrency: 8
+    total_requests: 200
+    request_timeout: 60
+    no_fairness_header: true
+
+scenario:
+  name: default-flow-impact
+  model: meta-llama/Llama-3.1-8B-Instruct
+  max_num_seqs: 20
+  window: 0
+  spread: 0
+  total_programs: 10
+  programs:
+    - profile: identified
+      ratio: 0.5
+    - profile: anonymous
+      ratio: 0.5

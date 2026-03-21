@@ -2,11 +2,12 @@
 """
 Post-run analysis for test/load-test.
 
-Reads per-phase results.jsonl and metrics.jsonl, produces 4 comparison plots:
-  1. latency.png          — P50/P99 end-to-end latency bar chart per program x phase
-  2. fairness_index.png   — Jain's fairness index over time, all phases overlaid
-  3. wait_time_phases.png — Per-program EWMA wait time over time, one subplot per phase
-  4. wait_time_overlay.png — All phases+programs on one chart for direct comparison
+Reads per-phase results.jsonl and metrics.jsonl, produces 5 comparison plots:
+  1. latency.png            — P50/P95/P99 end-to-end latency bar chart per program x phase
+  2. fairness_index.png     — Jain's fairness index over time, all phases overlaid
+  3. wait_time_phases.png   — Per-program EWMA wait time over time, one subplot per phase
+  4. wait_time_overlay.png  — All phases+programs on one chart for direct comparison
+  5. error_cumulative.png   — Cumulative errors per program over time, one subplot per phase
 
 Usage:
     python3 analyze.py results/simple-ab/
@@ -41,6 +42,23 @@ def load_results(phase_dir: str) -> List[dict]:
                     r = json.loads(line)
                     if r.get("status") == "ok":
                         records.append(r)
+                except json.JSONDecodeError:
+                    continue
+    return records
+
+
+def load_all_results(phase_dir: str) -> List[dict]:
+    """Load all results (including errors) from results.jsonl."""
+    path = os.path.join(phase_dir, "results.jsonl")
+    if not os.path.exists(path):
+        return []
+    records = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    records.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue
     return records
@@ -302,6 +320,68 @@ def plot_wait_time_overlay(phases: List[str], results_dir: str, out_path: str):
 
 
 # ---------------------------------------------------------------------------
+# Plot 5: Cumulative errors per program — one subplot per phase
+# ---------------------------------------------------------------------------
+
+def plot_error_cumulative(phases: List[str], results_dir: str, out_path: str):
+    n = len(phases)
+    if n == 0:
+        return
+
+    colors = plt.cm.tab10.colors
+    fig, axes = plt.subplots(n, 1, figsize=(10, 5 * n), squeeze=False)
+    any_data = False
+
+    for i, phase in enumerate(phases):
+        ax = axes[i][0]
+        records = load_all_results(os.path.join(results_dir, phase))
+        if not records:
+            ax.set_title(phase, fontsize=9)
+            ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
+            continue
+
+        # Find phase start time (earliest completed_at).
+        t0 = min(r["completed_at"] for r in records if "completed_at" in r)
+
+        # Group all records by program, sorted by time.
+        by_program: Dict[str, List[dict]] = {}
+        for r in records:
+            pid = r.get("program_id", "unknown")
+            by_program.setdefault(pid, []).append(r)
+
+        for j, (pid, prog_records) in enumerate(sorted(by_program.items())):
+            prog_records.sort(key=lambda r: r.get("completed_at", 0))
+            cum_errors = 0
+            xs, ys = [], []
+            for r in prog_records:
+                if r.get("status") != "ok":
+                    cum_errors += 1
+                t = r.get("completed_at", 0) - t0
+                xs.append(t)
+                ys.append(cum_errors)
+            if cum_errors > 0:
+                ax.plot(xs, ys, label=pid, color=colors[j % len(colors)], linewidth=1.2)
+                any_data = True
+
+        ax.set_title(phase, fontsize=9)
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Cumulative Errors")
+        ax.legend(fontsize=7, loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=4)
+        ax.grid(alpha=0.3)
+
+    if not any_data:
+        print("[analyze] No error data found, skipping error_cumulative.png")
+        plt.close(fig)
+        return
+
+    fig.suptitle("Cumulative Errors Per Program Over Time", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"[analyze] Wrote {out_path}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -336,6 +416,10 @@ def main():
     plot_wait_time_overlay(
         phases, results_dir,
         os.path.join(plots_dir, "wait_time_overlay.png"),
+    )
+    plot_error_cumulative(
+        phases, results_dir,
+        os.path.join(plots_dir, "error_cumulative.png"),
     )
 
     print(f"[analyze] All plots written to {plots_dir}/")

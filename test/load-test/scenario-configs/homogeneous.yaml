@@ -1,0 +1,25 @@
+# Homogeneous baseline test.
+# Fairness question: When all programs are identical, does every
+# scheduler achieve Jain's Fairness Index ~1.0?
+#
+# 10 identical programs. Any deviation from JFI=1.0 reveals scheduler
+# bias (map iteration order, cursor position, scoring normalization).
+
+profiles:
+  uniform:
+    prompt_tokens: 300
+    max_tokens: 256
+    concurrency: 8
+    total_requests: 200
+    request_timeout: 60
+
+scenario:
+  name: homogeneous
+  model: meta-llama/Llama-3.1-8B-Instruct
+  max_num_seqs: 20
+  window: 0
+  spread: 0
+  total_programs: 10
+  programs:
+    - profile: uniform
+      ratio: 1.0
