@@ -60,9 +60,39 @@ VLLM_DEPLOY="${VLLM_DEPLOY:-${MODEL_SLUG}-vllm-sim}"
 SCENARIO_NAME="$(basename "$SCENARIO" .yaml)"
 RESULTS_DIR="$SCRIPT_DIR/results/$SCENARIO_NAME"
 
+METRICS_URL="${METRICS_URL:-http://localhost:9090}"
+METRICS_PF_PID=""
+
 # --- Helpers ---
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
+
+# --- Metrics port-forward ---
+start_metrics_portforward() {
+    if [ -n "$METRICS_PF_PID" ] && kill -0 "$METRICS_PF_PID" 2>/dev/null; then
+        kill "$METRICS_PF_PID" 2>/dev/null || true
+        wait "$METRICS_PF_PID" 2>/dev/null || true
+    fi
+
+    log "Starting metrics port-forward (deployment/$EPP_NAME 9090:9090) ..."
+    kubectl -n "$NAMESPACE" port-forward "deployment/$EPP_NAME" 9090:9090 > /dev/null 2>&1 &
+    METRICS_PF_PID=$!
+
+    sleep 3
+    if kill -0 "$METRICS_PF_PID" 2>/dev/null; then
+        log "Metrics port-forward started (PID $METRICS_PF_PID)."
+    else
+        log "WARNING: Metrics port-forward failed. Metrics scraping will be skipped."
+        METRICS_PF_PID=""
+    fi
+}
+
+cleanup_metrics_portforward() {
+    if [ -n "$METRICS_PF_PID" ] && kill -0 "$METRICS_PF_PID" 2>/dev/null; then
+        kill "$METRICS_PF_PID" 2>/dev/null || true
+        wait "$METRICS_PF_PID" 2>/dev/null || true
+    fi
+}
 
 # --- Gateway health check ---
 check_gateway() {
@@ -194,6 +224,7 @@ main() {
     fi
 
     check_gateway
+    trap cleanup_metrics_portforward EXIT
 
     local phases_json
     phases_json="$(yaml_get phases '[]')"
@@ -220,12 +251,36 @@ main() {
 
         switch_config "$epp_config" "$phase_name"
 
+        # Restart port-forward (EPP pod changed after config switch)
+        start_metrics_portforward
+
+        # Start metrics scraper in background
+        local scraper_pid=""
+        if [ -n "$METRICS_PF_PID" ]; then
+            log "Starting metrics scraper (subsystem=$metrics_subsystem) ..."
+            "$PYTHON" "$SCRIPT_DIR/scrape_metrics.py" \
+                --url "$METRICS_URL/metrics" \
+                --subsystem "$metrics_subsystem" \
+                --duration 86400 \
+                --output "$phase_dir/metrics.jsonl" \
+                > "$phase_dir/scraper.log" 2>&1 &
+            scraper_pid=$!
+            log "Metrics scraper started (PID $scraper_pid)"
+        fi
+
         log "Running load generator ..."
         "$PYTHON" "$SCRIPT_DIR/loadgen.py" \
             --scenario "$SCRIPT_DIR/$SCENARIO" \
             --phase "$phase_name" \
             --gateway "$GATEWAY_URL" \
             --output "$phase_dir"
+
+        # Stop scraper
+        if [ -n "$scraper_pid" ] && kill -0 "$scraper_pid" 2>/dev/null; then
+            log "Stopping metrics scraper ..."
+            kill "$scraper_pid" 2>/dev/null || true
+            wait "$scraper_pid" 2>/dev/null || true
+        fi
 
         if [ $i -lt $((phase_count - 1)) ]; then
             log "Pausing 10s between phases ..."
@@ -234,7 +289,12 @@ main() {
     done
 
     log ""
+    log "Running analysis ..."
+    "$PYTHON" "$SCRIPT_DIR/analyze.py" "$RESULTS_DIR"
+
+    log ""
     log "=== All phases done. Results in $RESULTS_DIR ==="
+    log "=== Plots in $RESULTS_DIR/plots/ ==="
 }
 
 main "$@"

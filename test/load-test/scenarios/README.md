@@ -1,6 +1,6 @@
 # Scenario YAML Schema
 
-Each scenario file describes a load test: what programs send traffic, for how long, and which EPP configurations to compare.
+Each scenario file describes a load test: what programs send traffic, how many requests each sends, and which EPP configurations to compare.
 
 ## Top-level fields
 
@@ -27,16 +27,13 @@ When `kind: false`, the script assumes a cluster is already running and reachabl
 
 ## test
 
-Timing and request settings for the measurement window.
+Warmup settings. The measurement window starts after all warmup requests complete.
 
 ```yaml
 test:
-  duration: <int>       # Measurement window in seconds (after warmup)
-  timeout: <int>        # Per-request HTTP timeout in seconds
-
   warmup:
-    seconds: <int>      # Warmup duration in seconds
-    rate: <float>       # Requests per second during warmup
+    total_requests: <int>   # Number of warmup requests to send before measurement
+    concurrency: <int>      # Max simultaneous in-flight warmup requests
     prompt_tokens: <int>
     max_tokens: <int>
 ```
@@ -50,19 +47,19 @@ Each key is a program name. Programs run concurrently during the measurement win
 ```yaml
 programs:
   <name>:
-    rate: <float>           # Requests per second
-    concurrency: <int>      # Max simultaneous in-flight requests.
-                            # If all slots are full, new requests queue (wait) until a slot opens.
-                            # No requests are dropped. Total requests = rate × duration.
-    prompt_tokens: <int>    # Number of tokens in the prompt (fixed)
-    max_tokens: <int>       # Number of tokens to generate (fixed, ignore_eos=true enforced)
-    start_time: <int>       # Seconds after measurement start to begin sending (default: 0)
-    duration: <int>         # How long this program sends requests (default: full test duration)
+    total_requests: <int>      # Exactly how many requests this program sends
+    concurrency: <int>         # Max simultaneous in-flight requests.
+                               # If all slots are full, new sends wait until a slot opens.
+                               # No requests are dropped.
+    prompt_tokens: <int>       # Number of tokens in the prompt (fixed)
+    max_tokens: <int>          # Number of tokens to generate (fixed, ignore_eos=true enforced)
+    start_time: <int>          # Seconds after measurement start to begin sending (default: 0)
+    request_timeout: <int>     # Per-request HTTP timeout in seconds (default: 60)
     no_fairness_header: false  # If true, omit x-gateway-inference-fairness-id header.
                                # The request will be tracked as "default-flow" by the EPP.
 ```
 
-Programs without `start_time` begin immediately. Programs without `duration` run for the full test duration.
+Each program sends exactly `total_requests` requests as fast as `concurrency` allows, then stops. Programs without `start_time` begin immediately.
 
 The `x-gateway-inference-fairness-id` header is set to the program name by default. If `no_fairness_header: true`, the upstream EPP assigns the flow to `"default-flow"`.
 

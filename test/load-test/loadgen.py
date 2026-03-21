@@ -35,12 +35,12 @@ STATS_INTERVAL = 10.0  # seconds between live stats prints
 @dataclass
 class ProgramConfig:
     name: str
-    rate: float            # requests per second
-    concurrency: int       # max simultaneous in-flight
+    total_requests: int     # exactly how many requests to send
+    concurrency: int        # max simultaneous in-flight
     prompt_tokens: int
     max_tokens: int
-    start_time: float      # seconds after measurement start
-    duration: float        # how long to send (seconds)
+    start_time: float       # seconds after measurement start
+    request_timeout: float = 60.0  # per-request HTTP timeout
     no_fairness_header: bool = False
 
 
@@ -90,9 +90,8 @@ async def run_program(
     results: List[dict],
     record_results: bool,
     session: aiohttp.ClientSession,
-    timeout: float,
 ):
-    """Send requests for one program over its active window."""
+    """Send exactly total_requests for one program, gated by concurrency."""
     sem = asyncio.Semaphore(program.concurrency)
     prompt = build_prompt(program.prompt_tokens)
     url = f"{gateway}/v1/completions"
@@ -108,23 +107,17 @@ async def run_program(
         "ignore_eos": True,
     }
 
-    interval = 1.0 / program.rate
-
     # Wait until this program's start_time (relative to measurement_start).
     wall_start = measurement_start + program.start_time
     wait = wall_start - time.monotonic()
     if wait > 0:
         await asyncio.sleep(wait)
 
-    wall_end = wall_start + program.duration
-    next_send = time.monotonic()
-    pending: List[asyncio.Task] = []
-
     async def send_one():
         sent_at = time.time()
         stats.in_flight += 1
         try:
-            req_timeout = aiohttp.ClientTimeout(total=timeout)
+            req_timeout = aiohttp.ClientTimeout(total=program.request_timeout)
             async with session.post(url, json=body, headers=headers, timeout=req_timeout) as resp:
                 resp_data = await resp.json(content_type=None)
                 completed_at = time.time()
@@ -159,18 +152,13 @@ async def run_program(
                 "output_tokens": actual_output_tokens,
             })
 
-    while time.monotonic() < wall_end:
-        sleep_for = next_send - time.monotonic()
-        if sleep_for > 0:
-            await asyncio.sleep(sleep_for)
-
-        # Acquire semaphore — waits if all slots are in use (no drops).
+    pending: List[asyncio.Task] = []
+    for _ in range(program.total_requests):
         await sem.acquire()
         stats.sent += 1
         pending.append(asyncio.create_task(send_one()))
-        next_send += interval
 
-    # Drain all in-flight / queued requests.
+    # Drain all in-flight requests.
     if pending:
         await asyncio.gather(*pending, return_exceptions=True)
 
@@ -207,41 +195,6 @@ async def stats_printer(all_stats: List[ProgramStats], stop: asyncio.Event, star
 
 
 # ---------------------------------------------------------------------------
-# Warmup
-# ---------------------------------------------------------------------------
-
-async def run_warmup(cfg: dict, model: str, gateway: str, session: aiohttp.ClientSession, timeout: float):
-    warmup = cfg.get("test", {}).get("warmup", {})
-    seconds = float(warmup.get("seconds", 0))
-    if seconds <= 0:
-        return
-
-    rate         = float(warmup.get("rate", 1.0))
-    prompt_tokens = int(warmup.get("prompt_tokens", 128))
-    max_tokens    = int(warmup.get("max_tokens", 64))
-
-    print(f"[warmup] {seconds}s at {rate} req/s (prompt={prompt_tokens} max={max_tokens}) ...")
-    prog = ProgramConfig(
-        name="warmup",
-        rate=rate,
-        concurrency=max(4, int(rate * 2)),
-        prompt_tokens=prompt_tokens,
-        max_tokens=max_tokens,
-        start_time=0,
-        duration=seconds,
-        no_fairness_header=True,
-    )
-    stats = ProgramStats(name="warmup")
-    await run_program(
-        program=prog, model=model, gateway=gateway,
-        measurement_start=time.monotonic(),
-        stats=stats, results=[], record_results=False,
-        session=session, timeout=timeout,
-    )
-    print(f"[warmup] Done. sent={stats.sent} ok={stats.ok} err={stats.err}\n")
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -251,19 +204,17 @@ async def main(scenario_path: str, phase_name: str, gateway: str, output_dir: st
 
     model    = cfg["model"]
     test_cfg = cfg.get("test", {})
-    duration = float(test_cfg.get("duration", 120))
-    timeout  = float(test_cfg.get("timeout", 60))
 
     programs: List[ProgramConfig] = []
     for name, pc in cfg.get("programs", {}).items():
         programs.append(ProgramConfig(
             name=name,
-            rate=float(pc.get("rate", 1.0)),
+            total_requests=int(pc.get("total_requests", 100)),
             concurrency=int(pc.get("concurrency", 4)),
             prompt_tokens=int(pc.get("prompt_tokens", 512)),
             max_tokens=int(pc.get("max_tokens", 128)),
             start_time=float(pc.get("start_time", 0)),
-            duration=float(pc.get("duration", duration)),
+            request_timeout=float(pc.get("request_timeout", 60)),
             no_fairness_header=bool(pc.get("no_fairness_header", False)),
         ))
 
@@ -272,9 +223,31 @@ async def main(scenario_path: str, phase_name: str, gateway: str, output_dir: st
 
     connector = aiohttp.TCPConnector(limit=0)
     async with aiohttp.ClientSession(connector=connector) as session:
-        await run_warmup(cfg, model, gateway, session, timeout)
+        # Run warmup as a regular program (total_requests model, no results recorded).
+        warmup_cfg = test_cfg.get("warmup", {})
+        warmup_total = int(warmup_cfg.get("total_requests", 0))
+        if warmup_total > 0:
+            warmup_prog = ProgramConfig(
+                name="warmup",
+                total_requests=warmup_total,
+                concurrency=int(warmup_cfg.get("concurrency", 4)),
+                prompt_tokens=int(warmup_cfg.get("prompt_tokens", 128)),
+                max_tokens=int(warmup_cfg.get("max_tokens", 64)),
+                start_time=0,
+                no_fairness_header=True,
+            )
+            warmup_stats = ProgramStats(name="warmup")
+            print(f"[warmup] Sending {warmup_total} requests (concurrency={warmup_prog.concurrency}) ...")
+            await run_program(
+                program=warmup_prog, model=model, gateway=gateway,
+                measurement_start=time.monotonic(),
+                stats=warmup_stats, results=[], record_results=False,
+                session=session,
+            )
+            print(f"[warmup] Done. sent={warmup_stats.sent} ok={warmup_stats.ok} err={warmup_stats.err}\n")
 
-        print(f"[{phase_name}] Starting: {len(programs)} programs, {duration}s")
+        total_reqs = sum(p.total_requests for p in programs)
+        print(f"[{phase_name}] Starting: {len(programs)} programs, {total_reqs} total requests")
         print(f"[{phase_name}] Output:   {output_file}\n")
 
         all_stats   = [ProgramStats(name=p.name) for p in programs]
@@ -288,7 +261,7 @@ async def main(scenario_path: str, phase_name: str, gateway: str, output_dir: st
                 program=p, model=model, gateway=gateway,
                 measurement_start=t0,
                 stats=all_stats[i], results=all_results,
-                record_results=True, session=session, timeout=timeout,
+                record_results=True, session=session,
             ))
             for i, p in enumerate(programs)
         ]

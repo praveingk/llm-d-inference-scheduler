@@ -15,25 +15,22 @@ infra:
       - --max-model-len=4096
 
 test:
-  duration: 120
-  timeout: 60
-
   warmup:
-    seconds: 30
-    rate: 2.0
+    total_requests: 0
+    concurrency: 4
     prompt_tokens: 128
     max_tokens: 64
 
 programs:
   worker-a:
-    rate: 2.0
-    concurrency: 4
+    total_requests: 50
+    concurrency: 10
     prompt_tokens: 512
     max_tokens: 128
 
   worker-b:
-    rate: 2.0
-    concurrency: 4
+    total_requests: 50
+    concurrency: 10
     prompt_tokens: 512
     max_tokens: 128
 

@@ -8,15 +8,13 @@ Edit PROGRAM_PROFILES and SCENARIO_CONFIG below, then run:
     python3 gen_scenario.py -o scenarios/my-test.yaml
     python3 gen_scenario.py --seed 42 -o scenarios/my-test.yaml
 
-Each workload phase defines programs that arrive during a time window with a
-mix of named profiles. Start times within each window follow a Poisson process
-(uniformly spaced with random jitter) for realistic staggering.
+Programs arrive with Poisson-spaced start times across a configurable window.
+Each program sends exactly total_requests as fast as concurrency allows.
 
 EPP phases generated: program-aware, program-aware-drr, round-robin
 """
 
 import argparse
-import math
 import random
 import sys
 from typing import Dict, List
@@ -35,46 +33,53 @@ import yaml
 
 PROGRAM_PROFILES: Dict[str, dict] = {
     "heavy-aggressive": {
-        "prompt_tokens": 600,
-        "max_tokens":    512,
-        "rate":          10.0,
-        "concurrency":   30,
+        "prompt_tokens":   600,
+        "max_tokens":      512,
+        "concurrency":     30,
+        "total_requests":  500,
+        "request_timeout": 120,
     },
     "heavy-polite": {
-        "prompt_tokens": 600,
-        "max_tokens":    512,
-        "rate":          10.0,
-        "concurrency":   2,
+        "prompt_tokens":   600,
+        "max_tokens":      512,
+        "concurrency":     2,
+        "total_requests":  500,
+        "request_timeout": 120,
     },
     "heavy-slow": {
-        "prompt_tokens": 600,
-        "max_tokens":    512,
-        "rate":          1.0,
-        "concurrency":   4,
+        "prompt_tokens":   600,
+        "max_tokens":      512,
+        "concurrency":     4,
+        "total_requests":  200,
+        "request_timeout": 120,
     },
     "medium-normal": {
-        "prompt_tokens": 300,
-        "max_tokens":    256,
-        "rate":          5.0,
-        "concurrency":   8,
+        "prompt_tokens":   300,
+        "max_tokens":      256,
+        "concurrency":     8,
+        "total_requests":  300,
+        "request_timeout": 60,
     },
     "medium-aggressive": {
-        "prompt_tokens": 300,
-        "max_tokens":    256,
-        "rate":          5.0,
-        "concurrency":   20,
+        "prompt_tokens":   300,
+        "max_tokens":      256,
+        "concurrency":     20,
+        "total_requests":  300,
+        "request_timeout": 60,
     },
     "light-fast": {
-        "prompt_tokens": 150,
-        "max_tokens":    64,
-        "rate":          10.0,
-        "concurrency":   8,
+        "prompt_tokens":   150,
+        "max_tokens":      64,
+        "concurrency":     8,
+        "total_requests":  400,
+        "request_timeout": 60,
     },
     "light-slow": {
-        "prompt_tokens": 150,
-        "max_tokens":    64,
-        "rate":          1.0,
-        "concurrency":   2,
+        "prompt_tokens":   150,
+        "max_tokens":      64,
+        "concurrency":     2,
+        "total_requests":  100,
+        "request_timeout": 60,
     },
 }
 
@@ -89,69 +94,31 @@ SCENARIO_CONFIG = {
 
     # Warmup before measurement window.
     "warmup": {
-        "seconds":       30,
-        "rate":          2.0,
-        "prompt_tokens": 128,
-        "max_tokens":    64,
+        "total_requests": 0,
+        "concurrency":    4,
+        "prompt_tokens":  128,
+        "max_tokens":     64,
     },
 
-    # Total measurement duration (seconds). Must be >= end of last phase.
-    "duration": 600,
+    # Window for spreading program start times (seconds).
+    "window": 60,
 
-    # Per-request timeout (seconds).
-    "timeout": 60,
+    # Fraction of window over which start times are distributed.
+    "spread": 1,
 
-    # Load level: fraction of simulator capacity to target (0.0–1.0).
-    # Controls max_num_seqs in vllm-sim extra_args.
-    #   0.75 → moderate pressure, 25% spare capacity
-    #   0.95 → near-saturated, heavy queuing
-    "load_level": 0.75,
+    # Total number of sender programs (scale knob).
+    "total_programs": 100,
 
-    # Workload phases — programs arrive during [start, end) seconds.
-    # mix: {profile_name: fraction}  fractions must sum to 1.0
-    # programs: total number of sender programs in this phase
-    "phases": [
-        {
-            "start":    0,
-            "end":      300,
-            "programs": 10,
-            "mix": {
-                "heavy-aggressive": 0.3,
-                "medium-normal":    0.5,
-                "light-slow":       0.2,
-            },
-        },
-        {
-            "start":    300,
-            "end":      600,
-            "programs": 15,
-            "mix": {
-                "light-fast":       0.5,
-                "heavy-polite":     0.3,
-                "medium-normal":    0.2,
-            },
-        },
+    # vllm-sim concurrency limit (written into extra_args directly).
+    "max_num_seqs": 64,
+
+    # Program mix by profile — ratios must sum to 1.0.
+    "programs": [
+        {"profile": "heavy-aggressive", "ratio": 0.3},
+        {"profile": "medium-normal",    "ratio": 0.5},
+        {"profile": "light-slow",       "ratio": 0.2},
     ],
 }
-
-
-# ---------------------------------------------------------------------------
-# Capacity model (matches vllm-sim per-token latency defaults)
-# ---------------------------------------------------------------------------
-
-def estimate_request_time(prompt_tokens: int, max_tokens: int) -> float:
-    """Estimated seconds per request under the default vllm-sim latency model."""
-    prefill_ms    = 6.0 + prompt_tokens * 0.017
-    generation_ms = max_tokens * 6.0
-    return (prefill_ms + generation_ms) / 1000.0
-
-
-def auto_max_num_seqs(total_rate: float, load_level: float,
-                      prompt_tokens: int, max_tokens: int) -> int:
-    """Compute max_num_seqs so capacity ≈ total_rate / load_level, +25% headroom."""
-    req_time        = estimate_request_time(prompt_tokens, max_tokens)
-    target_capacity = total_rate / max(load_level, 0.01)
-    return max(4, int(math.ceil(target_capacity * req_time)))
 
 
 # ---------------------------------------------------------------------------
@@ -182,19 +149,20 @@ def poisson_start_times(n: int, window_start: float, window_end: float,
 # Profile distribution helper
 # ---------------------------------------------------------------------------
 
-def distribute_programs(n: int, mix: Dict[str, float],
+def distribute_programs(n: int, mix: List[dict],
                         rng: random.Random) -> List[str]:
     """
-    Return a list of n profile names drawn according to mix fractions.
+    Return a list of n profile names drawn according to ratio fractions.
     Uses round-then-assign-remainder to guarantee exactly n entries.
     """
     profiles: List[str] = []
     remainder = n
-    items     = sorted(mix.items(), key=lambda x: -x[1])  # largest fraction first
-    for i, (profile, frac) in enumerate(items):
-        count = remainder if i == len(items) - 1 else round(frac * n)
+    # Sort largest ratio first for stable assignment.
+    items = sorted(mix, key=lambda x: -x["ratio"])
+    for i, entry in enumerate(items):
+        count = remainder if i == len(items) - 1 else round(entry["ratio"] * n)
         count = max(0, min(count, remainder))
-        profiles.extend([profile] * count)
+        profiles.extend([entry["profile"]] * count)
         remainder -= count
     rng.shuffle(profiles)
     return profiles
@@ -205,68 +173,44 @@ def distribute_programs(n: int, mix: Dict[str, float],
 # ---------------------------------------------------------------------------
 
 def generate(cfg: dict, profiles: Dict[str, dict], seed: int) -> dict:
-    rng      = random.Random(seed)
-    duration = cfg["duration"]
-    timeout  = cfg["timeout"]
-    warmup   = cfg["warmup"]
-    load_lvl = cfg["load_level"]
+    rng           = random.Random(seed)
+    warmup        = cfg["warmup"]
+    window        = cfg["window"]
+    spread        = cfg["spread"]
+    total_progs   = cfg["total_programs"]
+    max_num_seqs  = cfg["max_num_seqs"]
+
+    # Validate profiles.
+    for entry in cfg["programs"]:
+        pname = entry["profile"]
+        if pname not in profiles:
+            raise ValueError(f"Unknown profile '{pname}'. Add it to PROGRAM_PROFILES.")
+
+    # Expand total_programs by ratios.
+    profile_list = distribute_programs(total_progs, cfg["programs"], rng)
+
+    # Generate Poisson start times across [0, window * spread].
+    spread_end   = window * spread
+    start_times  = poisson_start_times(total_progs, 0, spread_end, rng)
 
     programs: Dict[str, dict] = {}
-    all_rates: List[float]    = []
+    counter: Dict[str, int] = {}
 
-    # Blended token profile for capacity estimation.
-    total_prompt_w = 0.0
-    total_max_w    = 0.0
-    total_weight   = 0.0
+    for profile_name, t_start in zip(profile_list, start_times):
+        p = profiles[profile_name]
 
-    phase_counter: Dict[str, int] = {}
+        idx  = counter.get(profile_name, 0)
+        name = f"fg-{profile_name}-{idx:03d}"
+        counter[profile_name] = idx + 1
 
-    for ph_idx, phase in enumerate(cfg["phases"]):
-        p_start      = float(phase["start"])
-        p_end        = float(phase["end"])
-        n            = int(phase["programs"])
-        mix          = phase["mix"]
-        prog_duration = int(p_end - p_start)
-
-        for pname in mix:
-            if pname not in profiles:
-                raise ValueError(f"Unknown profile '{pname}'. Add it to PROGRAM_PROFILES.")
-
-        profile_list = distribute_programs(n, mix, rng)
-        start_times  = poisson_start_times(n, p_start, p_end, rng)
-
-        for profile_name, t_start in zip(profile_list, start_times):
-            p = profiles[profile_name]
-
-            key  = f"p{ph_idx}-{profile_name}"
-            idx  = phase_counter.get(key, 0)
-            name = f"fg-{key}-{idx:03d}"
-            phase_counter[key] = idx + 1
-
-            programs[name] = {
-                "rate":          p["rate"],
-                "concurrency":   p["concurrency"],
-                "prompt_tokens": p["prompt_tokens"],
-                "max_tokens":    p["max_tokens"],
-                "start_time":    int(t_start),
-                "duration":      prog_duration,
-            }
-
-            all_rates.append(p["rate"])
-            w = p["rate"] * estimate_request_time(p["prompt_tokens"], p["max_tokens"])
-            total_prompt_w += p["prompt_tokens"] * w
-            total_max_w    += p["max_tokens"]    * w
-            total_weight   += w
-
-    # Blended token profile for max_num_seqs.
-    if total_weight > 0:
-        blended_prompt = int(total_prompt_w / total_weight)
-        blended_max    = int(total_max_w    / total_weight)
-    else:
-        blended_prompt, blended_max = 300, 256
-
-    total_rate   = sum(all_rates)
-    max_num_seqs = auto_max_num_seqs(total_rate, load_lvl, blended_prompt, blended_max)
+        programs[name] = {
+            "total_requests":  p["total_requests"],
+            "concurrency":     p["concurrency"],
+            "prompt_tokens":   p["prompt_tokens"],
+            "max_tokens":      p["max_tokens"],
+            "start_time":      int(t_start),
+            "request_timeout": p["request_timeout"],
+        }
 
     return {
         "name":  cfg["name"],
@@ -289,9 +233,7 @@ def generate(cfg: dict, profiles: Dict[str, dict], seed: int) -> dict:
         },
 
         "test": {
-            "duration": duration,
-            "timeout":  timeout,
-            "warmup":   warmup,
+            "warmup": warmup,
         },
 
         "programs": programs,
@@ -314,11 +256,17 @@ def _ordered_representer(dumper, data):
 
 def dump_scenario(scenario: dict) -> str:
     yaml.add_representer(dict, _ordered_representer)
+    # Extract max-num-seqs from extra_args for header.
+    max_num_seqs = "?"
+    for arg in scenario["infra"]["vllm"]["extra_args"]:
+        if arg.startswith("--max-num-seqs="):
+            max_num_seqs = arg.split("=")[1]
+    total_reqs = sum(p["total_requests"] for p in scenario["programs"].values())
     header = (
         f"# Generated scenario: {scenario['name']}\n"
         f"# Programs: {len(scenario['programs'])}  "
-        f"Duration: {scenario['test']['duration']}s  "
-        f"max-num-seqs: {scenario['infra']['vllm']['extra_args'][-2].split('=')[1]}\n"
+        f"total_requests: {total_reqs}  "
+        f"max-num-seqs: {max_num_seqs}\n"
     )
     return header + yaml.dump(scenario, default_flow_style=False, sort_keys=False, allow_unicode=True)
 

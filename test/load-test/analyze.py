@@ -210,21 +210,19 @@ def plot_wait_time_phases(phases: List[str], results_dir: str, out_path: str):
     if n == 0:
         return
 
-    fig, axes = plt.subplots(1, n, figsize=(5 * n, 4), sharey=True)
-    if n == 1:
-        axes = [axes]
     colors = plt.cm.tab10.colors
+    fig, axes = plt.subplots(n, 1, figsize=(10, 4 * n), squeeze=False)
     any_data = False
 
-    for ax, phase in zip(axes, phases):
+    for i, phase in enumerate(phases):
+        ax = axes[i][0]
         records = load_metrics(os.path.join(results_dir, phase))
         if not records:
-            ax.set_title(phase)
+            ax.set_title(phase, fontsize=9)
             ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
             continue
 
         t0 = records[0]["ts"]
-        # Collect time series per program.
         program_series: Dict[str, list] = {}
         for r in records:
             t = r["ts"] - t0
@@ -240,10 +238,9 @@ def plot_wait_time_phases(phases: List[str], results_dir: str, out_path: str):
 
         ax.set_title(phase, fontsize=9)
         ax.set_xlabel("Time (s)")
+        ax.set_ylabel("EWMA Wait Time (ms)")
         ax.legend(fontsize=7)
         ax.grid(alpha=0.3)
-
-    axes[0].set_ylabel("EWMA Wait Time (ms)")
 
     if not any_data:
         print("[analyze] No EWMA wait data found, skipping wait_time_phases.png")
