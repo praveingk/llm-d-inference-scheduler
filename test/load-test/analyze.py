@@ -279,9 +279,13 @@ def plot_wait_time_phases(phases: List[str], results_dir: str, out_path: str):
                 if w is not None:
                     program_series.setdefault(pid, []).append((t, w))
 
+        seen_profiles: set = set()
         for pid, series in sorted(program_series.items()):
             xs, ys = zip(*series)
-            ax.plot(xs, ys, label=pid, color=cmap[_extract_profile(pid)], linewidth=1.2)
+            profile = _extract_profile(pid)
+            label = profile if profile not in seen_profiles else "_nolegend_"
+            seen_profiles.add(profile)
+            ax.plot(xs, ys, label=label, color=cmap[profile], linewidth=1.2)
             any_data = True
 
         ax.set_title(phase, fontsize=9)
@@ -335,10 +339,15 @@ def plot_wait_time_overlay(phases: List[str], results_dir: str, out_path: str):
                 if w is not None:
                     program_series.setdefault(pid, []).append((t, w))
 
+        seen_profiles: set = set()
         for pid, series in sorted(program_series.items()):
             xs, ys = zip(*series)
-            ax.plot(xs, ys, label=f"{phase}:{pid}",
-                    color=cmap[_extract_profile(pid)],
+            profile = _extract_profile(pid)
+            key = f"{phase}:{profile}"
+            label = key if key not in seen_profiles else "_nolegend_"
+            seen_profiles.add(key)
+            ax.plot(xs, ys, label=label,
+                    color=cmap[profile],
                     linestyle=line_styles[pi % len(line_styles)],
                     linewidth=1.2)
             any_data = True
@@ -397,6 +406,7 @@ def plot_error_cumulative(phases: List[str], results_dir: str, out_path: str):
             pid = r.get("program_id", "unknown")
             by_program.setdefault(pid, []).append(r)
 
+        seen_profiles: set = set()
         for pid, prog_records in sorted(by_program.items()):
             prog_records.sort(key=lambda r: r.get("completed_at", 0))
             cum_errors = 0
@@ -408,7 +418,10 @@ def plot_error_cumulative(phases: List[str], results_dir: str, out_path: str):
                 xs.append(t)
                 ys.append(cum_errors)
             if cum_errors > 0:
-                ax.plot(xs, ys, label=pid, color=cmap[_extract_profile(pid)], linewidth=1.2)
+                profile = _extract_profile(pid)
+                label = profile if profile not in seen_profiles else "_nolegend_"
+                seen_profiles.add(profile)
+                ax.plot(xs, ys, label=label, color=cmap[profile], linewidth=1.2)
                 any_data = True
 
         ax.set_title(phase, fontsize=9)
