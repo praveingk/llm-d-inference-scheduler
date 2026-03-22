@@ -8,6 +8,7 @@ timestamped JSONL records for later analysis.
 Metrics captured (per subsystem prefix):
   {subsystem}_jains_fairness_index
   {subsystem}_ewma_wait_time_milliseconds  per program_id
+  {subsystem}_queue_score                  per program_id  (program-aware only)
   {subsystem}_requests_total               per program_id
   {subsystem}_dispatched_total             per program_id
   inference_extension_flow_control_queue_size per fairness_id
@@ -85,15 +86,17 @@ def scrape_once(url: str, subsystem: str) -> dict:
     requests       = extract_by_label(metrics, f"{subsystem}_requests_total",  "program_id")
     dispatched     = extract_by_label(metrics, f"{subsystem}_dispatched_total", "program_id")
     queue_size     = extract_by_label(metrics, "inference_extension_flow_control_queue_size", "fairness_id")
+    queue_score    = extract_by_label(metrics, f"{subsystem}_queue_score", "program_id")
 
     # Build per-program dict keyed by all seen program IDs.
-    all_ids = set(ewma_wait) | set(requests) | set(dispatched)
+    all_ids = set(ewma_wait) | set(requests) | set(dispatched) | set(queue_score)
     per_program = {
         pid: {
             "ewma_wait_ms":  ewma_wait.get(pid),
             "requests":      requests.get(pid),
             "dispatched":    dispatched.get(pid),
             "queue_size":    queue_size.get(pid),  # matches when fairness_id == program name
+            "queue_score":   queue_score.get(pid),
         }
         for pid in sorted(all_ids)
     }
