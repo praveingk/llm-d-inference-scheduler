@@ -115,6 +115,28 @@ def group_latencies_by_program(records: List[dict]) -> Dict[str, List[float]]:
 
 
 # ---------------------------------------------------------------------------
+# Profile-based color mapping
+# ---------------------------------------------------------------------------
+
+def _extract_profile(pid: str) -> str:
+    """Extract profile name from program ID: fg-heavy-aggressive-003 -> heavy-aggressive."""
+    if not pid.startswith("fg-"):
+        return pid
+    rest = pid[3:]
+    parts = rest.rsplit("-", 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        return parts[0]
+    return rest
+
+
+def profile_color_map(program_ids) -> Dict[str, tuple]:
+    """Assign one color per unique profile. Programs sharing a profile get the same color."""
+    profiles = sorted(set(_extract_profile(pid) for pid in program_ids))
+    colors = plt.cm.tab10.colors
+    return {p: colors[i % len(colors)] for i, p in enumerate(profiles)}
+
+
+# ---------------------------------------------------------------------------
 # Plot 1: P50/P99 latency bar chart
 # ---------------------------------------------------------------------------
 
@@ -146,7 +168,7 @@ def plot_latency(phases: List[str], results_dir: str, out_path: str):
     n_phases     = len(phases)
 
     # Three rows (p50, p95, p99) stacked vertically.
-    fig, axes = plt.subplots(3, 1, figsize=(max(10, n_programs * n_phases * 0.8 + 2), 4 * 3), sharey=False)
+    fig, axes = plt.subplots(3, 1, figsize=(min(120, max(10, n_programs * 0.5 + 2)), 4 * 3), sharey=False)
     colors = plt.cm.tab10.colors
 
     for ax_idx, pct_label in enumerate(["p50", "p95", "p99"]):
@@ -229,9 +251,16 @@ def plot_wait_time_phases(phases: List[str], results_dir: str, out_path: str):
     if n == 0:
         return
 
-    colors = plt.cm.tab10.colors
-    fig, axes = plt.subplots(n, 1, figsize=(10, 5 * n), squeeze=False)
+    fig, axes = plt.subplots(n, 1, figsize=(12, 5 * n), squeeze=False)
     any_data = False
+
+    # Collect all program IDs across phases for consistent coloring.
+    all_pids: set = set()
+    for phase in phases:
+        records = load_metrics(os.path.join(results_dir, phase))
+        for r in records:
+            all_pids.update(r.get("per_program", {}).keys())
+    cmap = profile_color_map(all_pids)
 
     for i, phase in enumerate(phases):
         ax = axes[i][0]
@@ -250,15 +279,15 @@ def plot_wait_time_phases(phases: List[str], results_dir: str, out_path: str):
                 if w is not None:
                     program_series.setdefault(pid, []).append((t, w))
 
-        for j, (pid, series) in enumerate(sorted(program_series.items())):
+        for pid, series in sorted(program_series.items()):
             xs, ys = zip(*series)
-            ax.plot(xs, ys, label=pid, color=colors[j % len(colors)], linewidth=1.2)
+            ax.plot(xs, ys, label=pid, color=cmap[_extract_profile(pid)], linewidth=1.2)
             any_data = True
 
         ax.set_title(phase, fontsize=9)
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("EWMA Wait Time (ms)")
-        ax.legend(fontsize=7, loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=4)
+        ax.legend(fontsize=7, loc="upper left", bbox_to_anchor=(1.02, 1.0), ncol=1)
         ax.grid(alpha=0.3)
 
     if not any_data:
@@ -267,8 +296,9 @@ def plot_wait_time_phases(phases: List[str], results_dir: str, out_path: str):
         return
 
     fig.suptitle("Per-Program EWMA Wait Time Over Time", fontsize=11)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
+    fig.subplots_adjust(right=0.75)
+    fig.tight_layout(rect=[0, 0, 0.75, 1])
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"[analyze] Wrote {out_path}")
 
@@ -278,12 +308,21 @@ def plot_wait_time_phases(phases: List[str], results_dir: str, out_path: str):
 # ---------------------------------------------------------------------------
 
 def plot_wait_time_overlay(phases: List[str], results_dir: str, out_path: str):
-    fig, ax = plt.subplots(figsize=(11, 5))
-    colors   = plt.cm.tab20.colors
-    idx      = 0
+    fig, ax = plt.subplots(figsize=(11, 6))
     any_data = False
 
+    # Collect all program IDs across phases for consistent coloring.
+    all_pids: set = set()
     for phase in phases:
+        records = load_metrics(os.path.join(results_dir, phase))
+        for r in records:
+            all_pids.update(r.get("per_program", {}).keys())
+    cmap = profile_color_map(all_pids)
+
+    # Use different line styles per phase to distinguish them.
+    line_styles = ["-", "--", "-.", ":"]
+
+    for pi, phase in enumerate(phases):
         records = load_metrics(os.path.join(results_dir, phase))
         if not records:
             continue
@@ -299,8 +338,9 @@ def plot_wait_time_overlay(phases: List[str], results_dir: str, out_path: str):
         for pid, series in sorted(program_series.items()):
             xs, ys = zip(*series)
             ax.plot(xs, ys, label=f"{phase}:{pid}",
-                    color=colors[idx % len(colors)], linewidth=1.2)
-            idx += 1
+                    color=cmap[_extract_profile(pid)],
+                    linestyle=line_styles[pi % len(line_styles)],
+                    linewidth=1.2)
             any_data = True
 
     if not any_data:
@@ -310,11 +350,11 @@ def plot_wait_time_overlay(phases: List[str], results_dir: str, out_path: str):
 
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("EWMA Wait Time (ms)")
-    ax.legend(fontsize=7, ncol=2)
+    ax.legend(fontsize=7, loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=4)
     ax.grid(alpha=0.3)
     fig.suptitle("Per-Program EWMA Wait Time — All Phases Overlaid", fontsize=11)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"[analyze] Wrote {out_path}")
 
@@ -328,9 +368,17 @@ def plot_error_cumulative(phases: List[str], results_dir: str, out_path: str):
     if n == 0:
         return
 
-    colors = plt.cm.tab10.colors
-    fig, axes = plt.subplots(n, 1, figsize=(10, 5 * n), squeeze=False)
+    fig, axes = plt.subplots(n, 1, figsize=(12, 5 * n), squeeze=False)
     any_data = False
+
+    # Collect all program IDs across phases for consistent coloring.
+    all_pids: set = set()
+    for phase in phases:
+        records = load_all_results(os.path.join(results_dir, phase))
+        for r in records:
+            pid = r.get("program_id", "unknown")
+            all_pids.add(pid)
+    cmap = profile_color_map(all_pids)
 
     for i, phase in enumerate(phases):
         ax = axes[i][0]
@@ -349,7 +397,7 @@ def plot_error_cumulative(phases: List[str], results_dir: str, out_path: str):
             pid = r.get("program_id", "unknown")
             by_program.setdefault(pid, []).append(r)
 
-        for j, (pid, prog_records) in enumerate(sorted(by_program.items())):
+        for pid, prog_records in sorted(by_program.items()):
             prog_records.sort(key=lambda r: r.get("completed_at", 0))
             cum_errors = 0
             xs, ys = [], []
@@ -360,13 +408,13 @@ def plot_error_cumulative(phases: List[str], results_dir: str, out_path: str):
                 xs.append(t)
                 ys.append(cum_errors)
             if cum_errors > 0:
-                ax.plot(xs, ys, label=pid, color=colors[j % len(colors)], linewidth=1.2)
+                ax.plot(xs, ys, label=pid, color=cmap[_extract_profile(pid)], linewidth=1.2)
                 any_data = True
 
         ax.set_title(phase, fontsize=9)
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Cumulative Errors")
-        ax.legend(fontsize=7, loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=4)
+        ax.legend(fontsize=7, loc="upper left", bbox_to_anchor=(1.02, 1.0), ncol=1)
         ax.grid(alpha=0.3)
 
     if not any_data:
@@ -375,8 +423,8 @@ def plot_error_cumulative(phases: List[str], results_dir: str, out_path: str):
         return
 
     fig.suptitle("Cumulative Errors Per Program Over Time", fontsize=11)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
+    fig.tight_layout(rect=[0, 0, 0.75, 1])
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"[analyze] Wrote {out_path}")
 
