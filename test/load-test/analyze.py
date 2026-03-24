@@ -2,13 +2,14 @@
 """
 Post-run analysis for test/load-test.
 
-Reads per-phase results.jsonl and metrics.jsonl, produces 6 comparison plots:
+Reads per-phase results.jsonl and metrics.jsonl, produces 7 comparison plots:
   1. latency.png            — P50/P95/P99 end-to-end latency bar chart per program x phase
   2. fairness_index.png     — Jain's fairness index over time, all phases overlaid
   3. wait_time_phases.png   — Per-program EWMA wait time over time, one subplot per phase
   4. wait_time_overlay.png  — All phases+programs on one chart for direct comparison
   5. error_cumulative.png   — Cumulative errors per program over time, one subplot per phase
   6. queue_score.png        — Per-program scheduling score over time, one subplot per phase (program-aware only)
+  7. program_duration.png   — Total wall-clock duration per program (first send → last complete)
 
 Usage:
     python3 analyze.py results/simple-ab/
@@ -515,6 +516,63 @@ def plot_queue_score_phases(phases: List[str], results_dir: str, out_path: str):
 
 
 # ---------------------------------------------------------------------------
+# Plot 7: Total program duration — wall-clock time from first send to last complete
+# ---------------------------------------------------------------------------
+
+def plot_program_duration(phases: List[str], results_dir: str, out_path: str):
+    phase_data = {}
+    all_programs = []
+    for phase in phases:
+        records = load_all_results(os.path.join(results_dir, phase))
+        by_program: Dict[str, List[dict]] = {}
+        for r in records:
+            pid = r.get("program_id", "unknown")
+            by_program.setdefault(pid, []).append(r)
+
+        durations = {}
+        for pid, recs in by_program.items():
+            sent_times = [r["sent_at"] for r in recs if "sent_at" in r]
+            completed_times = [r["completed_at"] for r in recs if "completed_at" in r]
+            if sent_times and completed_times:
+                durations[pid] = (max(completed_times) - min(sent_times))
+            if pid not in all_programs:
+                all_programs.append(pid)
+        phase_data[phase] = durations
+
+    if not all_programs:
+        print("[analyze] No data found, skipping program_duration.png")
+        return
+
+    all_programs = sorted(all_programs)
+    n_programs = len(all_programs)
+    n_phases = len(phases)
+
+    fig, ax = plt.subplots(figsize=(max(8, n_programs * 0.8 + 2), 5))
+    colors = plt.cm.tab10.colors
+    x = range(n_programs)
+    bar_w = 0.8 / max(n_phases, 1)
+
+    for i, phase in enumerate(phases):
+        vals = [phase_data[phase].get(pid, 0) for pid in all_programs]
+        offsets = [xi - 0.4 + (i + 0.5) * bar_w for xi in x]
+        ax.bar(offsets, vals, width=bar_w * 0.9,
+               label=phase, color=colors[i % len(colors)])
+
+    ax.set_title("Total Program Duration (first send → last complete)", fontsize=11)
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(all_programs, rotation=30, ha="right", fontsize=8)
+    ax.set_ylabel("Duration (s)")
+    ax.legend(fontsize=7)
+    ax.yaxis.set_minor_locator(ticker.AutoMinorLocator())
+    ax.grid(axis="y", alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"[analyze] Wrote {out_path}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -557,6 +615,10 @@ def main():
     plot_queue_score_phases(
         phases, results_dir,
         os.path.join(plots_dir, "queue_score.png"),
+    )
+    plot_program_duration(
+        phases, results_dir,
+        os.path.join(plots_dir, "program_duration.png"),
     )
 
     print(f"[analyze] All plots written to {plots_dir}/")

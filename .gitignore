@@ -42,3 +42,8 @@ vendor
 
 # Coverage reports (HTML; .out files are already covered by *.out above)
 /coverage
+
+# Test virtualenvs and results
+.venv
+test/load-test/results/
+test/fairness/results/

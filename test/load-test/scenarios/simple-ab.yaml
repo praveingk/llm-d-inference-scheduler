@@ -35,7 +35,7 @@ programs:
     max_tokens: 128
 
 phases:
-  - name: program-aware
+  - name: program-aware-ewma
     epp_config: configs/program-aware.yaml
     metrics_subsystem: program_aware
   - name: program-aware-drr

@@ -822,7 +822,7 @@ programs:
     request_timeout: 60
     no_fairness_header: true
 phases:
-- name: program-aware
+- name: program-aware-ewma
   epp_config: configs/program-aware.yaml
   metrics_subsystem: program_aware
 - name: program-aware-drr

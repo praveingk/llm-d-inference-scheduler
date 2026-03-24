@@ -272,7 +272,7 @@ def generate(cfg: dict, profiles: Dict[str, dict], seed: int) -> dict:
         "programs": programs,
 
         "phases": [
-            {"name": "program-aware",     "epp_config": "configs/program-aware.yaml",     "metrics_subsystem": "program_aware"},
+            {"name": "program-aware-ewma",     "epp_config": "configs/program-aware.yaml",     "metrics_subsystem": "program_aware"},
             {"name": "program-aware-drr", "epp_config": "configs/program-aware-drr.yaml", "metrics_subsystem": "program_aware"},
             {"name": "round-robin",       "epp_config": "configs/round-robin.yaml",        "metrics_subsystem": "round_robin"},
         ],
