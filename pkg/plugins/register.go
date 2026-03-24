@@ -8,6 +8,7 @@ import (
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/plugins/preparedata"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/plugins/profile"
 	programaware "github.com/llm-d/llm-d-inference-scheduler/pkg/plugins/program-aware"
+	roundrobin "github.com/llm-d/llm-d-inference-scheduler/pkg/plugins/round-robin"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/plugins/scorer"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
 )
@@ -43,4 +44,6 @@ func RegisterAllPlugins() {
 	plugin.Register(multi.ContextLengthAwareType, multi.ContextLengthAwareFactory)
   // program-aware fairness plugin
 	plugin.Register(programaware.ProgramAwarePluginType, programaware.ProgramAwarePluginFactory)
+	// round-robin fairness plugin (with metrics for A/B comparison)
+	plugin.Register(roundrobin.RoundRobinPluginType, roundrobin.RoundRobinPluginFactory)
 }
