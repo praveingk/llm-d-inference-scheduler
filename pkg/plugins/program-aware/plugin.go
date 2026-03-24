@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/flowcontrol"
@@ -26,6 +27,10 @@ const (
 	// no x-gateway-inference-fairness-id header is present on the request.
 	// Matches the constant in sigs.k8s.io/gateway-api-inference-extension/pkg/epp/handlers/request.go.
 	defaultFairnessID = "default-flow"
+
+	// defaultDefaultShareLimit is the fraction of Pick() calls reserved for the
+	// default queue when slotted dispatch is enabled.
+	defaultDefaultShareLimit = 0.2
 )
 
 // Config holds the JSON-decoded configuration for the plugin.
@@ -41,6 +46,15 @@ type Config struct {
 	//            usage is deducted at response completion. Provides provably
 	//            proportional fairness independent of request rate or size.
 	Strategy string `json:"strategy"`
+
+	// SlottedDispatch enables reserved-slot scheduling for the default queue.
+	// When true, every Nth Pick() call is reserved for the default (unlabeled)
+	// queue, preventing starvation under heavy labeled-program traffic.
+	SlottedDispatch bool `json:"slottedDispatch"`
+
+	// DefaultShareLimit is the fraction of Pick() calls reserved for the default
+	// queue (range (0,1)). Only used when SlottedDispatch is true. Default: 0.2.
+	DefaultShareLimit float64 `json:"defaultShareLimit"`
 }
 
 // Compile-time interface assertions.
@@ -52,7 +66,7 @@ var (
 )
 
 // ProgramAwarePluginFactory creates a new ProgramAwarePlugin from JSON config.
-// Example config: {"strategy": "drr"}
+// Example config: {"strategy": "drr", "slottedDispatch": true, "defaultShareLimit": 0.2}
 //
 //nolint:revive
 func ProgramAwarePluginFactory(name string, rawCfg json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
@@ -66,10 +80,28 @@ func ProgramAwarePluginFactory(name string, rawCfg json.RawMessage, _ plugin.Han
 	if err != nil {
 		return nil, fmt.Errorf("%s plugin %q: %w", ProgramAwarePluginType, name, err)
 	}
-	return &ProgramAwarePlugin{
+
+	p := &ProgramAwarePlugin{
 		name:     name,
 		strategy: strategy,
-	}, nil
+	}
+
+	if cfg.SlottedDispatch {
+		share := cfg.DefaultShareLimit
+		if share == 0 {
+			share = defaultDefaultShareLimit
+		}
+		if share <= 0 || share >= 1 {
+			return nil, fmt.Errorf("invalid config for %s plugin %q: defaultShareLimit must be in (0, 1), got %v", ProgramAwarePluginType, name, cfg.DefaultShareLimit)
+		}
+		p.slottedDispatch = true
+		p.cycleLength = int(math.Round(1.0 / share))
+		if p.cycleLength < 1 {
+			p.cycleLength = 1
+		}
+	}
+
+	return p, nil
 }
 
 // ProgramAwarePlugin implements a FairnessPolicy that selects which program's
@@ -82,6 +114,11 @@ func ProgramAwarePluginFactory(name string, rawCfg json.RawMessage, _ plugin.Han
 type ProgramAwarePlugin struct {
 	name     string
 	strategy ScoringStrategy
+
+	// Slotted dispatch: reserves every Nth Pick() call for the default queue.
+	slottedDispatch bool
+	cycleLength     int
+	pickCounter     atomic.Uint64
 
 	// programMetrics stores aggregated metrics per program.
 	// Key: program ID (string), Value: *ProgramMetrics.
@@ -118,11 +155,22 @@ func (p *ProgramAwarePlugin) NewState(_ context.Context) any {
 	return nil
 }
 
+// isDefaultQueue returns true if the queue belongs to the default (unlabeled) flow.
+func isDefaultQueue(queue flowcontrol.FlowQueueAccessor) bool {
+	id := queue.FlowKey().ID
+	return id == defaultFairnessID || id == ""
+}
+
 // Pick selects which program queue to service next.
 //
 // For each queue in the band, the configured ScoringStrategy is given a chance
 // to update its per-program state (OnPickStart), then the queue with the highest
 // score is selected for dispatch.
+//
+// When slotted dispatch is enabled, every Nth call (where N = cycleLength) is
+// reserved for the default queue. On other calls only labeled queues are scored.
+// Both paths are work-conserving: if the designated queue type is empty, the
+// other type is tried as a fallback.
 func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBandAccessor) (flowcontrol.FlowQueueAccessor, error) {
 	start := time.Now()
 	defer func() {
@@ -134,34 +182,12 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 	}
 
 	var bestQueue flowcontrol.FlowQueueAccessor
-	bestScore := -1.0
-	strategy := p.getStrategy()
 
-	band.IterateQueues(func(queue flowcontrol.FlowQueueAccessor) (keepIterating bool) {
-		if queue == nil {
-			return true
-		}
-
-		queueLen := queue.Len()
-		metrics := p.getOrCreateMetrics(queue.FlowKey().ID)
-
-		// Strategy hook: runs for every queue, including empty ones.
-		// DRR: allocates quantum for active queues, resets deficit for idle queues.
-		// EWMA: no-op.
-		strategy.OnPickStart(queue.FlowKey().ID, queueLen, metrics)
-
-		if queueLen == 0 {
-			return true
-		}
-
-		score := p.scoreQueue(queue)
-		queueScore.WithLabelValues(queue.FlowKey().ID).Set(score)
-		if score > bestScore {
-			bestScore = score
-			bestQueue = queue
-		}
-		return true
-	})
+	if p.slottedDispatch {
+		bestQueue = p.pickSlotted(band)
+	} else {
+		bestQueue = p.pickScored(band, false)
+	}
 
 	// Record the selected item's enqueue time so PreRequest can compute
 	// the actual flow-control queue wait time (enqueue → dispatch).
@@ -174,6 +200,66 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 	fairnessIndex.Set(p.computeFairnessIndex())
 
 	return bestQueue, nil
+}
+
+// pickSlotted implements the slotted dispatch algorithm.
+// Every cycleLength-th call reserves the pick for the default queue.
+func (p *ProgramAwarePlugin) pickSlotted(band flowcontrol.PriorityBandAccessor) flowcontrol.FlowQueueAccessor {
+	counter := p.pickCounter.Add(1)
+	isDefaultSlot := (counter % uint64(p.cycleLength)) == 0
+
+	if isDefaultSlot {
+		// Default slot: try default queue first, fall back to best labeled queue.
+		if dq := band.Queue(defaultFairnessID); dq != nil && dq.Len() > 0 {
+			return dq
+		}
+		return p.pickScored(band, true)
+	}
+
+	// Labeled slot: score labeled queues only, fall back to default if none available.
+	if best := p.pickScored(band, true); best != nil {
+		return best
+	}
+	if dq := band.Queue(defaultFairnessID); dq != nil && dq.Len() > 0 {
+		return dq
+	}
+	return nil
+}
+
+// pickScored iterates queues and returns the highest-scoring non-empty one.
+// It also runs OnPickStart for every queue so DRR quantum bookkeeping stays correct.
+// When skipDefault is true, the default queue is excluded from scoring.
+func (p *ProgramAwarePlugin) pickScored(band flowcontrol.PriorityBandAccessor, skipDefault bool) flowcontrol.FlowQueueAccessor {
+	var bestQueue flowcontrol.FlowQueueAccessor
+	bestScore := -1.0
+	strategy := p.getStrategy()
+
+	band.IterateQueues(func(queue flowcontrol.FlowQueueAccessor) (keepIterating bool) {
+		if queue == nil {
+			return true
+		}
+
+		queueLen := queue.Len()
+		metrics := p.getOrCreateMetrics(queue.FlowKey().ID)
+		strategy.OnPickStart(queue.FlowKey().ID, queueLen, metrics)
+
+		if queueLen == 0 {
+			return true
+		}
+		if skipDefault && isDefaultQueue(queue) {
+			return true
+		}
+
+		score := p.scoreQueue(queue)
+		queueScore.WithLabelValues(queue.FlowKey().ID).Set(score)
+		if score > bestScore {
+			bestScore = score
+			bestQueue = queue
+		}
+		return true
+	})
+
+	return bestQueue
 }
 
 // scoreQueue delegates to the configured ScoringStrategy.

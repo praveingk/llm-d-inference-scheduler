@@ -23,6 +23,41 @@ func TestFactory(t *testing.T) {
 
 	assert.Equal(t, ProgramAwarePluginType, p.TypedName().Type)
 	assert.Equal(t, "test-instance", p.TypedName().Name)
+
+	pa := p.(*ProgramAwarePlugin)
+	assert.False(t, pa.slottedDispatch, "slotted dispatch should be off by default")
+}
+
+func TestFactory_SlottedDispatch(t *testing.T) {
+	cfg := []byte(`{"strategy":"ewma","slottedDispatch":true,"defaultShareLimit":0.25}`)
+	p, err := ProgramAwarePluginFactory("slotted", cfg, nil)
+	require.NoError(t, err)
+
+	pa := p.(*ProgramAwarePlugin)
+	assert.True(t, pa.slottedDispatch)
+	assert.Equal(t, 4, pa.cycleLength, "1/0.25 = 4")
+}
+
+func TestFactory_SlottedDispatch_DefaultShare(t *testing.T) {
+	cfg := []byte(`{"slottedDispatch":true}`)
+	p, err := ProgramAwarePluginFactory("slotted-default", cfg, nil)
+	require.NoError(t, err)
+
+	pa := p.(*ProgramAwarePlugin)
+	assert.True(t, pa.slottedDispatch)
+	assert.Equal(t, 5, pa.cycleLength, "default 0.2 → cycle length 5")
+}
+
+func TestFactory_SlottedDispatch_InvalidShare(t *testing.T) {
+	for _, cfg := range []string{
+		`{"slottedDispatch":true,"defaultShareLimit":-0.5}`,
+		`{"slottedDispatch":true,"defaultShareLimit":1.0}`,
+		`{"slottedDispatch":true,"defaultShareLimit":2.0}`,
+	} {
+		_, err := ProgramAwarePluginFactory("bad", []byte(cfg), nil)
+		assert.Error(t, err, "config: %s", cfg)
+		assert.Contains(t, err.Error(), "defaultShareLimit")
+	}
 }
 
 // --- ProgramMetrics tests ---
@@ -442,6 +477,176 @@ func TestComputeFairnessIndex_NoWaitData(t *testing.T) {
 	p.programMetrics.Store("prog-b", &ProgramMetrics{})
 
 	assert.InDelta(t, 1.0, p.computeFairnessIndex(), 0.001, "no wait data → 1.0")
+}
+
+// --- Slotted dispatch tests ---
+
+func TestPick_SlottedDispatch_DefaultSlotPicksDefaultQueue(t *testing.T) {
+	p := &ProgramAwarePlugin{
+		slottedDispatch: true,
+		cycleLength:     5,
+	}
+
+	now := time.Now()
+	defaultQ := &fcmocks.MockFlowQueueAccessor{
+		LenV:     2,
+		FlowKeyV: flowcontrol.FlowKey{ID: defaultFairnessID},
+		PeekHeadV: &fcmocks.MockQueueItemAccessor{
+			EnqueueTimeV:     now.Add(-100 * time.Millisecond),
+			OriginalRequestV: &fcmocks.MockFlowControlRequest{IDV: "req-default"},
+		},
+	}
+	labeledQ := &fcmocks.MockFlowQueueAccessor{
+		LenV:     5,
+		FlowKeyV: flowcontrol.FlowKey{ID: "prog-a"},
+		PeekHeadV: &fcmocks.MockQueueItemAccessor{
+			EnqueueTimeV:     now.Add(-500 * time.Millisecond),
+			OriginalRequestV: &fcmocks.MockFlowControlRequest{IDV: "req-labeled"},
+		},
+	}
+
+	band := &fcmocks.MockPriorityBandAccessor{
+		IterateQueuesFunc: func(cb func(flowcontrol.FlowQueueAccessor) bool) {
+			cb(defaultQ)
+			cb(labeledQ)
+		},
+		QueueFunc: func(id string) flowcontrol.FlowQueueAccessor {
+			if id == defaultFairnessID {
+				return defaultQ
+			}
+			return nil
+		},
+	}
+
+	// Advance counter to cycleLength-1 so next Pick() hits a default slot (counter%5==0).
+	p.pickCounter.Store(uint64(p.cycleLength - 1))
+
+	queue, err := p.Pick(context.Background(), band)
+	assert.NoError(t, err)
+	assert.Equal(t, defaultQ, queue, "default slot should pick default queue")
+}
+
+func TestPick_SlottedDispatch_LabeledSlotSkipsDefault(t *testing.T) {
+	p := &ProgramAwarePlugin{
+		slottedDispatch: true,
+		cycleLength:     5,
+	}
+
+	now := time.Now()
+	defaultQ := &fcmocks.MockFlowQueueAccessor{
+		LenV:     10,
+		FlowKeyV: flowcontrol.FlowKey{ID: defaultFairnessID},
+		PeekHeadV: &fcmocks.MockQueueItemAccessor{
+			EnqueueTimeV:     now.Add(-5 * time.Second),
+			OriginalRequestV: &fcmocks.MockFlowControlRequest{IDV: "req-default"},
+		},
+	}
+	labeledQ := &fcmocks.MockFlowQueueAccessor{
+		LenV:     1,
+		FlowKeyV: flowcontrol.FlowKey{ID: "prog-a"},
+		PeekHeadV: &fcmocks.MockQueueItemAccessor{
+			EnqueueTimeV:     now,
+			OriginalRequestV: &fcmocks.MockFlowControlRequest{IDV: "req-labeled"},
+		},
+	}
+
+	band := &fcmocks.MockPriorityBandAccessor{
+		IterateQueuesFunc: func(cb func(flowcontrol.FlowQueueAccessor) bool) {
+			cb(defaultQ)
+			cb(labeledQ)
+		},
+		QueueFunc: func(id string) flowcontrol.FlowQueueAccessor {
+			if id == defaultFairnessID {
+				return defaultQ
+			}
+			return nil
+		},
+	}
+
+	// Counter at 0, so next Pick() yields counter=1, which is NOT a default slot.
+	p.pickCounter.Store(0)
+
+	queue, err := p.Pick(context.Background(), band)
+	assert.NoError(t, err)
+	assert.Equal(t, labeledQ, queue, "labeled slot should skip default queue even if it has longer wait")
+}
+
+func TestPick_SlottedDispatch_DefaultSlotFallsBackToLabeled(t *testing.T) {
+	p := &ProgramAwarePlugin{
+		slottedDispatch: true,
+		cycleLength:     5,
+	}
+
+	now := time.Now()
+	emptyDefaultQ := &fcmocks.MockFlowQueueAccessor{
+		LenV:     0,
+		FlowKeyV: flowcontrol.FlowKey{ID: defaultFairnessID},
+	}
+	labeledQ := &fcmocks.MockFlowQueueAccessor{
+		LenV:     2,
+		FlowKeyV: flowcontrol.FlowKey{ID: "prog-a"},
+		PeekHeadV: &fcmocks.MockQueueItemAccessor{
+			EnqueueTimeV:     now,
+			OriginalRequestV: &fcmocks.MockFlowControlRequest{IDV: "req-labeled"},
+		},
+	}
+
+	band := &fcmocks.MockPriorityBandAccessor{
+		IterateQueuesFunc: func(cb func(flowcontrol.FlowQueueAccessor) bool) {
+			cb(emptyDefaultQ)
+			cb(labeledQ)
+		},
+		QueueFunc: func(id string) flowcontrol.FlowQueueAccessor {
+			if id == defaultFairnessID {
+				return emptyDefaultQ
+			}
+			return nil
+		},
+	}
+
+	// Set up for default slot.
+	p.pickCounter.Store(uint64(p.cycleLength - 1))
+
+	queue, err := p.Pick(context.Background(), band)
+	assert.NoError(t, err)
+	assert.Equal(t, labeledQ, queue, "default slot with empty default queue should fall back to labeled")
+}
+
+func TestPick_SlottedDispatch_LabeledSlotFallsBackToDefault(t *testing.T) {
+	p := &ProgramAwarePlugin{
+		slottedDispatch: true,
+		cycleLength:     5,
+	}
+
+	now := time.Now()
+	defaultQ := &fcmocks.MockFlowQueueAccessor{
+		LenV:     3,
+		FlowKeyV: flowcontrol.FlowKey{ID: defaultFairnessID},
+		PeekHeadV: &fcmocks.MockQueueItemAccessor{
+			EnqueueTimeV:     now,
+			OriginalRequestV: &fcmocks.MockFlowControlRequest{IDV: "req-default"},
+		},
+	}
+
+	band := &fcmocks.MockPriorityBandAccessor{
+		IterateQueuesFunc: func(cb func(flowcontrol.FlowQueueAccessor) bool) {
+			cb(defaultQ)
+			// No labeled queues.
+		},
+		QueueFunc: func(id string) flowcontrol.FlowQueueAccessor {
+			if id == defaultFairnessID {
+				return defaultQ
+			}
+			return nil
+		},
+	}
+
+	// Labeled slot (counter=1, not divisible by 5).
+	p.pickCounter.Store(0)
+
+	queue, err := p.Pick(context.Background(), band)
+	assert.NoError(t, err)
+	assert.Equal(t, defaultQ, queue, "labeled slot with no labeled queues should fall back to default")
 }
 
 // --- scoreQueue tests ---
