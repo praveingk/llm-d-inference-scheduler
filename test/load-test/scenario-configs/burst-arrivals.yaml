@@ -1,0 +1,35 @@
+# Burst arrivals test.
+# Fairness question: When new programs arrive mid-run, do they get
+# fair treatment despite having no dispatch history?
+#
+# 5 early programs start at t=0, 5 late programs arrive at t=30-60s.
+# All programs are identical except for arrival time.
+# Two profile names (early/late) so output programs are distinguishable.
+
+profiles:
+  early:
+    prompt_tokens: 300
+    max_tokens: 256
+    concurrency: 8
+    total_requests: 200
+    request_timeout: 120
+  late:
+    prompt_tokens: 300
+    max_tokens: 256
+    concurrency: 8
+    total_requests: 200
+    request_timeout: 120
+
+scenario:
+  name: burst-arrivals
+  model: meta-llama/Llama-3.1-8B-Instruct
+  max_num_seqs: 32
+  window: 60
+  spread: 0.5
+  total_programs: 10
+  programs:
+    - profile: early
+      ratio: 0.5
+    - profile: late
+      ratio: 0.5
+      window: [30, 60]

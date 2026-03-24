@@ -1,0 +1,51 @@
+# Production-like workload mix with anonymous traffic.
+# ~20% of programs send without fairness headers, merging into "default-flow".
+
+profiles:
+  heavy-aggressive:
+    prompt_tokens: 600
+    max_tokens: 512
+    concurrency: 30
+    total_requests: 500
+    request_timeout: 120
+  medium-normal:
+    prompt_tokens: 300
+    max_tokens: 256
+    concurrency: 8
+    total_requests: 300
+    request_timeout: 60
+  light-slow:
+    prompt_tokens: 150
+    max_tokens: 64
+    concurrency: 2
+    total_requests: 100
+    request_timeout: 60
+  anonymous:
+    prompt_tokens: 300
+    max_tokens: 256
+    concurrency: 6
+    total_requests: 200
+    request_timeout: 60
+    no_fairness_header: true
+
+scenario:
+  name: production-mix
+  model: meta-llama/Llama-3.1-8B-Instruct
+  max_num_seqs: 64
+  window: 60
+  spread: 1
+  total_programs: 100
+  warmup:
+    total_requests: 0
+    concurrency: 4
+    prompt_tokens: 128
+    max_tokens: 64
+  programs:
+    - profile: heavy-aggressive
+      ratio: 0.25
+    - profile: medium-normal
+      ratio: 0.40
+    - profile: light-slow
+      ratio: 0.15
+    - profile: anonymous
+      ratio: 0.20

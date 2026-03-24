@@ -1,0 +1,46 @@
+name: simple-ab
+model: meta-llama/Llama-3.1-8B-Instruct
+
+infra:
+  kind: true
+  namespace: default
+  vllm:
+    extra_args:
+      - --latency-calculator=per-token
+      - --prefill-overhead=6ms
+      - --prefill-time-per-token=17us
+      - --inter-token-latency=6ms
+      - --inter-token-latency-std-dev=1ms
+      - --max-num-seqs=256
+      - --max-model-len=4096
+
+test:
+  warmup:
+    total_requests: 0
+    concurrency: 4
+    prompt_tokens: 128
+    max_tokens: 64
+
+programs:
+  worker-a:
+    total_requests: 50
+    concurrency: 10
+    prompt_tokens: 512
+    max_tokens: 128
+
+  worker-b:
+    total_requests: 50
+    concurrency: 10
+    prompt_tokens: 512
+    max_tokens: 128
+
+phases:
+  - name: program-aware
+    epp_config: configs/program-aware.yaml
+    metrics_subsystem: program_aware
+  - name: program-aware-drr
+    epp_config: configs/program-aware-drr.yaml
+    metrics_subsystem: program_aware
+  - name: round-robin
+    epp_config: configs/round-robin.yaml
+    metrics_subsystem: round_robin

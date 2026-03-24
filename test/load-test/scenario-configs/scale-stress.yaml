@@ -1,0 +1,64 @@
+# Scale stress test.
+# Fairness question: Does Jain's fairness index remain stable with
+# 200 programs? Does Pick() latency stay acceptable?
+#
+# 200 programs across 6 profiles, production-like mix.
+
+profiles:
+  heavy-aggressive:
+    prompt_tokens: 600
+    max_tokens: 512
+    concurrency: 30
+    total_requests: 500
+    request_timeout: 120
+  heavy-polite:
+    prompt_tokens: 600
+    max_tokens: 512
+    concurrency: 2
+    total_requests: 500
+    request_timeout: 120
+  medium-normal:
+    prompt_tokens: 300
+    max_tokens: 256
+    concurrency: 8
+    total_requests: 300
+    request_timeout: 60
+  medium-aggressive:
+    prompt_tokens: 300
+    max_tokens: 256
+    concurrency: 20
+    total_requests: 300
+    request_timeout: 60
+  light-fast:
+    prompt_tokens: 150
+    max_tokens: 64
+    concurrency: 8
+    total_requests: 400
+    request_timeout: 60
+  light-slow:
+    prompt_tokens: 150
+    max_tokens: 64
+    concurrency: 2
+    total_requests: 100
+    request_timeout: 60
+
+scenario:
+  name: scale-stress
+  model: meta-llama/Llama-3.1-8B-Instruct
+  max_num_seqs: 64
+  window: 60
+  spread: 1
+  total_programs: 200
+  programs:
+    - profile: heavy-aggressive
+      ratio: 0.15
+    - profile: heavy-polite
+      ratio: 0.10
+    - profile: medium-normal
+      ratio: 0.30
+    - profile: medium-aggressive
+      ratio: 0.15
+    - profile: light-fast
+      ratio: 0.15
+    - profile: light-slow
+      ratio: 0.15
