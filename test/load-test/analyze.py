@@ -2,7 +2,7 @@
 """
 Post-run analysis for test/load-test.
 
-Reads per-phase results.jsonl and metrics.jsonl, produces 7 comparison plots:
+Reads per-phase results.jsonl and metrics.jsonl, produces 9 comparison plots:
   1. latency.png            — P50/P95/P99 end-to-end latency bar chart per program x phase
   2. fairness_index.png     — Jain's fairness index over time, all phases overlaid
   3. wait_time_phases.png   — Per-program EWMA wait time over time, one subplot per phase
@@ -10,6 +10,8 @@ Reads per-phase results.jsonl and metrics.jsonl, produces 7 comparison plots:
   5. error_cumulative.png   — Cumulative errors per program over time, one subplot per phase
   6. queue_score.png        — Per-program scheduling score over time, one subplot per phase (program-aware only)
   7. program_duration.png   — Total wall-clock duration per program (first send → last complete)
+  8. latency_scatter.png    — Per-request latency over time, one subplot per phase
+  9. first_request_latency.png — First request latency per program, one subplot per phase
 
 Usage:
     python3 analyze.py results/simple-ab/
@@ -573,6 +575,144 @@ def plot_program_duration(phases: List[str], results_dir: str, out_path: str):
 
 
 # ---------------------------------------------------------------------------
+# Plot 8: Per-request latency scatter — one subplot per phase
+# ---------------------------------------------------------------------------
+
+def plot_latency_scatter(phases: List[str], results_dir: str, out_path: str):
+    n = len(phases)
+    if n == 0:
+        return
+
+    fig, axes = plt.subplots(n, 1, figsize=(12, 5 * n), squeeze=False)
+    any_data = False
+
+    # Collect all program IDs across phases for consistent coloring.
+    all_pids: set = set()
+    for phase in phases:
+        records = load_results(os.path.join(results_dir, phase))
+        for r in records:
+            all_pids.add(r.get("program_id", "unknown"))
+    cmap = profile_color_map(all_pids)
+
+    for i, phase in enumerate(phases):
+        ax = axes[i][0]
+        records = load_results(os.path.join(results_dir, phase))
+        if not records:
+            ax.set_title(phase, fontsize=9)
+            ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
+            continue
+
+        t0 = min(r["sent_at"] for r in records if "sent_at" in r)
+
+        # Group by program for coloring.
+        by_program: Dict[str, List[dict]] = {}
+        for r in records:
+            pid = r.get("program_id", "unknown")
+            by_program.setdefault(pid, []).append(r)
+
+        seen_profiles: set = set()
+        for pid, recs in sorted(by_program.items()):
+            xs = [r["sent_at"] - t0 for r in recs if "sent_at" in r]
+            ys = [r["latency_ms"] for r in recs]
+            profile = _extract_profile(pid)
+            label = profile if profile not in seen_profiles else "_nolegend_"
+            seen_profiles.add(profile)
+            ax.scatter(xs, ys, label=label, color=cmap[profile], s=12, alpha=0.6)
+            any_data = True
+
+        ax.set_title(phase, fontsize=9)
+        ax.set_xlabel("Time since phase start (s)")
+        ax.set_ylabel("Latency (ms)")
+        ax.legend(fontsize=7, loc="upper left", bbox_to_anchor=(1.02, 1.0), ncol=1)
+        ax.grid(alpha=0.3)
+
+    if not any_data:
+        print("[analyze] No latency data found, skipping latency_scatter.png")
+        plt.close(fig)
+        return
+
+    fig.suptitle("Per-Request Latency Over Time", fontsize=11)
+    fig.tight_layout(rect=[0, 0, 0.75, 1])
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[analyze] Wrote {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Plot 9: First request latency per program — one subplot per phase
+# ---------------------------------------------------------------------------
+
+def plot_first_request_latency(phases: List[str], results_dir: str, out_path: str):
+    n = len(phases)
+    if n == 0:
+        return
+
+    fig, axes = plt.subplots(n, 1, figsize=(12, 5 * n), squeeze=False)
+    any_data = False
+
+    # Collect all program IDs across phases for consistent coloring.
+    all_pids: set = set()
+    for phase in phases:
+        records = load_results(os.path.join(results_dir, phase))
+        for r in records:
+            all_pids.add(r.get("program_id", "unknown"))
+    cmap = profile_color_map(all_pids)
+
+    for i, phase in enumerate(phases):
+        ax = axes[i][0]
+        records = load_results(os.path.join(results_dir, phase))
+        if not records:
+            ax.set_title(phase, fontsize=9)
+            ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
+            continue
+
+        t0 = min(r["sent_at"] for r in records if "sent_at" in r)
+
+        # Find the first request per program (earliest sent_at).
+        first_req: Dict[str, dict] = {}
+        for r in records:
+            if "sent_at" not in r or "completed_at" not in r:
+                continue
+            pid = r.get("program_id", "unknown")
+            if pid not in first_req or r["sent_at"] < first_req[pid]["sent_at"]:
+                first_req[pid] = r
+
+        if not first_req:
+            ax.set_title(phase, fontsize=9)
+            ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
+            continue
+
+        seen_profiles: set = set()
+        for pid, r in sorted(first_req.items()):
+            x = r["sent_at"] - t0
+            y = r["completed_at"] - r["sent_at"]
+            profile = _extract_profile(pid)
+            label = profile if profile not in seen_profiles else "_nolegend_"
+            seen_profiles.add(profile)
+            ax.scatter([x], [y], color=cmap[profile], s=40, zorder=3, label=label)
+            ax.annotate(pid, (x, y), textcoords="offset points",
+                        xytext=(5, 5), fontsize=6, alpha=0.8)
+            any_data = True
+
+        ax.set_title(phase, fontsize=9)
+        ax.set_xlabel("Time since phase start (s)")
+        ax.set_ylabel("First Request Latency (s)")
+        ax.legend(fontsize=7, loc="upper left", bbox_to_anchor=(1.02, 1.0), ncol=1)
+        ax.grid(alpha=0.3)
+
+    if not any_data:
+        print("[analyze] No first-request data found, skipping first_request_latency.png")
+        plt.close(fig)
+        return
+
+    fig.suptitle("First Request Latency Per Program", fontsize=11)
+    fig.tight_layout(rect=[0, 0, 0.75, 1])
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[analyze] Wrote {out_path}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -619,6 +759,14 @@ def main():
     plot_program_duration(
         phases, results_dir,
         os.path.join(plots_dir, "program_duration.png"),
+    )
+    plot_latency_scatter(
+        phases, results_dir,
+        os.path.join(plots_dir, "latency_scatter.png"),
+    )
+    plot_first_request_latency(
+        phases, results_dir,
+        os.path.join(plots_dir, "first_request_latency.png"),
     )
 
     print(f"[analyze] All plots written to {plots_dir}/")
