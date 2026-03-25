@@ -16,6 +16,10 @@ type ProgramMetrics struct {
 	waitCount         int64   // number of wait time observations
 	hasWaitData       bool
 
+	// Per-request throughput tracking: tokens/sec per completed request.
+	throughputSum   float64 // sum of per-request tokens/sec values
+	throughputCount int64   // number of throughput observations
+
 	totalRequests     atomic.Int64
 	dispatchedCount   atomic.Int64
 	totalInputTokens  atomic.Int64
@@ -76,6 +80,25 @@ func (m *ProgramMetrics) TotalAverageWaitTime() float64 {
 func (m *ProgramMetrics) RecordTokens(input, output int64) {
 	m.totalInputTokens.Add(input)
 	m.totalOutputTokens.Add(output)
+}
+
+// RecordThroughput records a per-request throughput observation (tokens/sec).
+func (m *ProgramMetrics) RecordThroughput(tokensPerSec float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.throughputSum += tokensPerSec
+	m.throughputCount++
+}
+
+// AverageThroughput returns the mean per-request throughput (tokens/sec)
+// across all completed requests. Returns 0 if no data.
+func (m *ProgramMetrics) AverageThroughput() float64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.throughputCount == 0 {
+		return 0
+	}
+	return m.throughputSum / float64(m.throughputCount)
 }
 
 // TotalRequests returns the total number of requests seen for this program.

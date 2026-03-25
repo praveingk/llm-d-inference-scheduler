@@ -84,8 +84,8 @@ func (p *roundRobin) ResponseComplete(ctx context.Context, request *scheduling.L
 		programID = defaultFairnessID
 	}
 
-	// Cleanup per-request timestamp regardless of program ID presence.
-	p.requestTimestamps.Delete(request.RequestId)
+	// Load and delete the enqueue timestamp (needed for throughput before cleanup).
+	enqueueTimeRaw, hasTimestamp := p.requestTimestamps.LoadAndDelete(request.RequestId)
 
 	if response != nil {
 		metrics := p.getOrCreateMetrics(programID)
@@ -96,8 +96,21 @@ func (p *roundRobin) ResponseComplete(ctx context.Context, request *scheduling.L
 		inputTokensTotal.WithLabelValues(programID).Add(float64(promptTokens))
 		outputTokensTotal.WithLabelValues(programID).Add(float64(completionTokens))
 
+		// Compute per-request throughput: tokens/sec from enqueue to response completion.
+		if hasTimestamp {
+			enqueueTime := enqueueTimeRaw.(time.Time)
+			durationSec := time.Since(enqueueTime).Seconds()
+			if durationSec > 0 {
+				totalTokens := float64(promptTokens + completionTokens)
+				tokensPerSec := totalTokens / durationSec
+				metrics.RecordThroughput(tokensPerSec)
+				throughputTokensPerSec.WithLabelValues(programID).Set(metrics.AverageThroughput())
+			}
+		}
+
 		log.FromContext(ctx).V(logutil.TRACE).Info("ResponseComplete: recorded tokens",
 			"requestId", request.RequestId, "programId", programID,
-			"promptTokens", promptTokens, "completionTokens", completionTokens)
+			"promptTokens", promptTokens, "completionTokens", completionTokens,
+			"avgThroughput", metrics.AverageThroughput())
 	}
 }
