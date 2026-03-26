@@ -145,7 +145,7 @@ def profile_color_map(program_ids) -> Dict[str, tuple]:
 # ---------------------------------------------------------------------------
 
 def plot_latency(phases: List[str], results_dir: str, out_path: str):
-    # Collect p50/p95/p99 per (phase, program).
+    # Collect p50/p75/p90/p95/p99 per (phase, program).
     phase_data = {}
     all_programs = []
     for phase in phases:
@@ -154,6 +154,8 @@ def plot_latency(phases: List[str], results_dir: str, out_path: str):
         phase_data[phase] = {
             pid: {
                 "p50": percentile(lats, 50),
+                "p75": percentile(lats, 75),
+                "p90": percentile(lats, 90),
                 "p95": percentile(lats, 95),
                 "p99": percentile(lats, 99),
             }
@@ -171,11 +173,11 @@ def plot_latency(phases: List[str], results_dir: str, out_path: str):
     n_programs   = len(all_programs)
     n_phases     = len(phases)
 
-    # Three rows (p50, p95, p99) stacked vertically.
-    fig, axes = plt.subplots(3, 1, figsize=(min(120, max(10, n_programs * 0.5 + 2)), 4 * 3), sharey=False)
+    # Five rows (p50, p75, p90, p95, p99) stacked vertically.
+    fig, axes = plt.subplots(5, 1, figsize=(min(120, max(10, n_programs * 0.5 + 2)), 4 * 5), sharey=False)
     colors = plt.cm.tab10.colors
 
-    for ax_idx, pct_label in enumerate(["p50", "p95", "p99"]):
+    for ax_idx, pct_label in enumerate(["p50", "p75", "p90", "p95", "p99"]):
         ax = axes[ax_idx]
         x  = range(n_programs)
         bar_w = 0.8 / max(n_phases, 1)
