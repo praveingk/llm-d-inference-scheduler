@@ -257,10 +257,9 @@ def generate(cfg: dict, profiles: Dict[str, dict], seed: int) -> dict:
                     "--latency-calculator=per-token",
                     "--prefill-overhead=6ms",
                     "--prefill-time-per-token=17us",
-                    "--inter-token-latency=6ms",
-                    "--inter-token-latency-std-dev=1ms",
+                    "--inter-token-latency=1ms",
                     f"--max-num-seqs={max_num_seqs}",
-                    "--max-model-len=4096",
+                    "--max-model-len=100000",
                 ],
             },
         },
@@ -272,9 +271,11 @@ def generate(cfg: dict, profiles: Dict[str, dict], seed: int) -> dict:
         "programs": programs,
 
         "phases": [
+            {"name": "program-aware-throughput",     "epp_config": "configs/program-throughput.yaml",     "metrics_subsystem": "program_aware"},
             {"name": "program-aware-ewma",     "epp_config": "configs/program-aware.yaml",     "metrics_subsystem": "program_aware"},
             {"name": "program-aware-drr", "epp_config": "configs/program-aware-drr.yaml", "metrics_subsystem": "program_aware"},
             {"name": "round-robin",       "epp_config": "configs/round-robin.yaml",        "metrics_subsystem": "round_robin"},
+            {"name": "no-flow-controller",       "epp_config": "configs/baseline.yaml",        "metrics_subsystem": "round_robin"},
         ],
     }
 

@@ -1,0 +1,198 @@
+# Generated scenario: production-mix
+# Programs: 20  total_requests: 5440  max-num-seqs: 64
+name: production-mix
+model: meta-llama/Llama-3.1-8B-Instruct
+infra:
+  kind: true
+  namespace: default
+  vllm:
+    extra_args:
+    - --latency-calculator=per-token
+    - --prefill-overhead=6ms
+    - --prefill-time-per-token=17us
+    - --inter-token-latency=1ms
+    - --max-num-seqs=64
+    - --max-model-len=100000
+test:
+  warmup:
+    total_requests: 0
+    concurrency: 4
+    prompt_tokens: 128
+    max_tokens: 64
+programs:
+  fg-light-slow-000:
+    total_requests: 80
+    concurrency: 4
+    prompt_tokens: 150
+    max_tokens: 150
+    start_time: 0
+    request_timeout: 60
+    no_fairness_header: false
+  fg-heavy-aggressive-000:
+    total_requests: 320
+    concurrency: 16
+    prompt_tokens: 15000
+    max_tokens: 15000
+    start_time: 0
+    request_timeout: 120
+    no_fairness_header: false
+  fg-heavy-aggressive-001:
+    total_requests: 320
+    concurrency: 16
+    prompt_tokens: 15000
+    max_tokens: 15000
+    start_time: 0
+    request_timeout: 120
+    no_fairness_header: false
+  fg-heavy-aggressive-002:
+    total_requests: 320
+    concurrency: 16
+    prompt_tokens: 15000
+    max_tokens: 15000
+    start_time: 0
+    request_timeout: 120
+    no_fairness_header: false
+  fg-heavy-aggressive-003:
+    total_requests: 320
+    concurrency: 16
+    prompt_tokens: 15000
+    max_tokens: 15000
+    start_time: 0
+    request_timeout: 120
+    no_fairness_header: false
+  fg-heavy-aggressive-004:
+    total_requests: 320
+    concurrency: 16
+    prompt_tokens: 15000
+    max_tokens: 15000
+    start_time: 0
+    request_timeout: 120
+    no_fairness_header: false
+  fg-heavy-aggressive-005:
+    total_requests: 320
+    concurrency: 16
+    prompt_tokens: 15000
+    max_tokens: 15000
+    start_time: 0
+    request_timeout: 120
+    no_fairness_header: false
+  fg-light-slow-001:
+    total_requests: 80
+    concurrency: 4
+    prompt_tokens: 150
+    max_tokens: 150
+    start_time: 0
+    request_timeout: 60
+    no_fairness_header: false
+  fg-heavy-aggressive-006:
+    total_requests: 320
+    concurrency: 16
+    prompt_tokens: 15000
+    max_tokens: 15000
+    start_time: 0
+    request_timeout: 120
+    no_fairness_header: false
+  fg-heavy-aggressive-007:
+    total_requests: 320
+    concurrency: 16
+    prompt_tokens: 15000
+    max_tokens: 15000
+    start_time: 0
+    request_timeout: 120
+    no_fairness_header: false
+  fg-light-slow-002:
+    total_requests: 80
+    concurrency: 4
+    prompt_tokens: 150
+    max_tokens: 150
+    start_time: 0
+    request_timeout: 60
+    no_fairness_header: false
+  fg-heavy-aggressive-008:
+    total_requests: 320
+    concurrency: 16
+    prompt_tokens: 15000
+    max_tokens: 15000
+    start_time: 0
+    request_timeout: 120
+    no_fairness_header: false
+  fg-heavy-aggressive-009:
+    total_requests: 320
+    concurrency: 16
+    prompt_tokens: 15000
+    max_tokens: 15000
+    start_time: 0
+    request_timeout: 120
+    no_fairness_header: false
+  fg-heavy-aggressive-010:
+    total_requests: 320
+    concurrency: 16
+    prompt_tokens: 15000
+    max_tokens: 15000
+    start_time: 0
+    request_timeout: 120
+    no_fairness_header: false
+  fg-heavy-aggressive-011:
+    total_requests: 320
+    concurrency: 16
+    prompt_tokens: 15000
+    max_tokens: 15000
+    start_time: 0
+    request_timeout: 120
+    no_fairness_header: false
+  fg-light-slow-003:
+    total_requests: 80
+    concurrency: 4
+    prompt_tokens: 150
+    max_tokens: 150
+    start_time: 0
+    request_timeout: 60
+    no_fairness_header: false
+  fg-heavy-aggressive-012:
+    total_requests: 320
+    concurrency: 16
+    prompt_tokens: 15000
+    max_tokens: 15000
+    start_time: 0
+    request_timeout: 120
+    no_fairness_header: false
+  fg-heavy-aggressive-013:
+    total_requests: 320
+    concurrency: 16
+    prompt_tokens: 15000
+    max_tokens: 15000
+    start_time: 0
+    request_timeout: 120
+    no_fairness_header: false
+  fg-heavy-aggressive-014:
+    total_requests: 320
+    concurrency: 16
+    prompt_tokens: 15000
+    max_tokens: 15000
+    start_time: 0
+    request_timeout: 120
+    no_fairness_header: false
+  fg-heavy-aggressive-015:
+    total_requests: 320
+    concurrency: 16
+    prompt_tokens: 15000
+    max_tokens: 15000
+    start_time: 0
+    request_timeout: 120
+    no_fairness_header: false
+phases:
+- name: program-aware-throughput
+  epp_config: configs/program-throughput.yaml
+  metrics_subsystem: program_aware
+- name: program-aware-ewma
+  epp_config: configs/program-aware.yaml
+  metrics_subsystem: program_aware
+- name: program-aware-drr
+  epp_config: configs/program-aware-drr.yaml
+  metrics_subsystem: program_aware
+- name: round-robin
+  epp_config: configs/round-robin.yaml
+  metrics_subsystem: round_robin
+- name: no-flow-controller
+  epp_config: configs/baseline.yaml
+  metrics_subsystem: round_robin

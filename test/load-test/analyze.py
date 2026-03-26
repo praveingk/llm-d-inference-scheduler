@@ -518,6 +518,77 @@ def plot_queue_score_phases(phases: List[str], results_dir: str, out_path: str):
 
 
 # ---------------------------------------------------------------------------
+# Plot 10: Per-program throughput (tokens/sec) — one subplot per phase
+# ---------------------------------------------------------------------------
+
+def plot_throughput_phases(phases: List[str], results_dir: str, out_path: str):
+    n = len(phases)
+    if n == 0:
+        return
+
+    fig, axes = plt.subplots(n, 1, figsize=(12, 5 * n), squeeze=False)
+    any_data = False
+
+    # Collect all program IDs across phases for consistent coloring.
+    all_pids: set = set()
+    for phase in phases:
+        records = load_metrics(os.path.join(results_dir, phase))
+        for r in records:
+            all_pids.update(r.get("per_program", {}).keys())
+    cmap = profile_color_map(all_pids)
+
+    for i, phase in enumerate(phases):
+        ax = axes[i][0]
+        records = load_metrics(os.path.join(results_dir, phase))
+        if not records:
+            ax.set_title(phase, fontsize=9)
+            ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
+            continue
+
+        t0 = records[0]["ts"]
+        program_series: Dict[str, list] = {}
+        for r in records:
+            t = r["ts"] - t0
+            for pid, pdata in r.get("per_program", {}).items():
+                tp = pdata.get("throughput_tps")
+                if tp is not None:
+                    program_series.setdefault(pid, []).append((t, tp))
+
+        if not program_series:
+            ax.set_title(phase, fontsize=9)
+            ax.text(0.5, 0.5, "no throughput data", ha="center", va="center",
+                    transform=ax.transAxes, color="grey", fontsize=10)
+            continue
+
+        seen_profiles: set = set()
+        for pid, series in sorted(program_series.items()):
+            xs, ys = zip(*series)
+            profile = _extract_profile(pid)
+            label = profile if profile not in seen_profiles else "_nolegend_"
+            seen_profiles.add(profile)
+            ax.plot(xs, ys, label=label, color=cmap[profile], linewidth=1.2)
+            any_data = True
+
+        ax.set_title(phase, fontsize=9)
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Throughput (tokens/sec)")
+        ax.legend(fontsize=7, loc="upper left", bbox_to_anchor=(1.02, 1.0), ncol=1)
+        ax.grid(alpha=0.3)
+
+    if not any_data:
+        print("[analyze] No throughput data found, skipping throughput.png")
+        plt.close(fig)
+        return
+
+    fig.suptitle("Per-Program Average Throughput Over Time", fontsize=11)
+    fig.subplots_adjust(right=0.75)
+    fig.tight_layout(rect=[0, 0, 0.75, 1])
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[analyze] Wrote {out_path}")
+
+
+# ---------------------------------------------------------------------------
 # Plot 7: Total program duration — wall-clock time from first send to last complete
 # ---------------------------------------------------------------------------
 
@@ -761,6 +832,10 @@ def main():
     plot_queue_score_phases(
         phases, results_dir,
         os.path.join(plots_dir, "queue_score.png"),
+    )
+    plot_throughput_phases(
+        phases, results_dir,
+        os.path.join(plots_dir, "throughput.png"),
     )
     plot_program_duration(
         phases, results_dir,

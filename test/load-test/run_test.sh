@@ -282,6 +282,9 @@ main() {
             wait "$scraper_pid" 2>/dev/null || true
         fi
 
+        log "Running analysis after phase $phase_name ..."
+        "$PYTHON" "$SCRIPT_DIR/analyze.py" "$RESULTS_DIR"
+
         if [ $i -lt $((phase_count - 1)) ]; then
             log "Pausing 10s between phases ..."
             sleep 10
