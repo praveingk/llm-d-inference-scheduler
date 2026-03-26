@@ -182,7 +182,7 @@ programs:
     no_fairness_header: false
 phases:
 - name: program-aware-throughput
-  epp_config: configs/program-throughput.yaml
+  epp_config: configs/program-aware-throughput.yaml
   metrics_subsystem: program_aware
 - name: program-aware-ewma
   epp_config: configs/program-aware.yaml
