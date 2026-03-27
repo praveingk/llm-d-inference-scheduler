@@ -287,7 +287,7 @@ main() {
         epp_pod="$(kubectl -n "$NAMESPACE" get pods -l app="$EPP_NAME" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
         if [ -n "$epp_pod" ]; then
             log "Copying pick log from pod $epp_pod ..."
-            kubectl -n "$NAMESPACE" cp "$epp_pod:/tmp/pick.jsonl" "$phase_dir/pick.jsonl" 2>/dev/null || \
+            kubectl -n "$NAMESPACE" cp "$epp_pod:/tmp/pick.jsonl" "$phase_dir/pick.jsonl" || \
                 log "WARNING: Could not copy pick log (file may not exist)."
         fi
 
