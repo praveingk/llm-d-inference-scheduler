@@ -301,20 +301,18 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 				},
 			})
 		}
-		// Add empty queues so the visualizer sees all programs at every pick.
+		// Add programs with empty queues using programMetrics (which persists
+		// across the lifetime of the plugin, unlike flow queues which may be GC'd).
 		scoredSet := make(map[string]struct{}, len(entries))
 		for _, e := range entries {
 			scoredSet[e.queue.FlowKey().ID] = struct{}{}
 		}
-		band.IterateQueues(func(queue flowcontrol.FlowQueueAccessor) (keepIterating bool) {
-			if queue == nil {
-				return true
-			}
-			programID := queue.FlowKey().ID
+		p.programMetrics.Range(func(key, value any) bool {
+			programID := key.(string)
 			if _, ok := scoredSet[programID]; ok {
 				return true // already logged above
 			}
-			metrics := p.getOrCreateMetrics(programID)
+			metrics := value.(*ProgramMetrics)
 			candidates = append(candidates, PickLogCandidate{
 				ProgramID:        programID,
 				QueueDepth:       0,
