@@ -727,12 +727,42 @@ function renderPickDetail() {
   if (STATE.charts['chart-pick-scores']) STATE.charts['chart-pick-scores'].destroy();
   STATE.charts['chart-pick-scores'] = new Chart(document.getElementById('chart-pick-scores'), {
     type: 'bar',
-    data: { labels: barLabels, datasets: [{ data: barData, backgroundColor: barColors, borderWidth: 0 }] },
+    data: { labels: barLabels, datasets: [{ data: barData, backgroundColor: barColors, borderWidth: 0, barThickness: 20 }] },
     options: {
       ...baseOpts(), indexAxis: 'y',
-      plugins: { ...baseOpts().plugins, legend: { display: false } },
-      scales: { x: { min: 0, title: { display: true, text: 'Score', font: { size: 10 } } } },
+      plugins: {
+        ...baseOpts().plugins, legend: { display: false },
+        tooltip: { callbacks: { label: ctx => 'Score: ' + ctx.raw.toFixed(4) } },
+      },
+      scales: {
+        x: { min: 0, max: Math.max(1, ...barData) * 1.15, title: { display: true, text: 'Score', font: { size: 10 } } },
+        y: {
+          ticks: {
+            color: (ctx) => {
+              const pid = barLabels[ctx.index];
+              return pid === p.winnerId ? '#22c55e' : 'var(--text)';
+            },
+            font: { size: 11 },
+          },
+        },
+      },
     },
+    plugins: [{
+      id: 'scoreLabels',
+      afterDatasetsDraw(chart) {
+        const ctx = chart.ctx;
+        chart.data.datasets[0].data.forEach((val, i) => {
+          const meta = chart.getDatasetMeta(0).data[i];
+          ctx.save();
+          ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#333';
+          ctx.font = '11px monospace';
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(val.toFixed(4), meta.x + 4, meta.y);
+          ctx.restore();
+        });
+      }
+    }],
   });
 
   // Sparkline - winner score over last 50 picks
