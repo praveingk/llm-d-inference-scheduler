@@ -1041,10 +1041,6 @@ def main():
         phases, results_dir,
         os.path.join(plots_dir, "queue_score.png"),
     )
-    plot_throughput_phases(
-        phases, results_dir,
-        os.path.join(plots_dir, "throughput.png"),
-    )
     plot_program_duration(
         phases, results_dir,
         os.path.join(plots_dir, "program_duration.png"),
@@ -1065,11 +1061,6 @@ def main():
         phases, results_dir,
         os.path.join(plots_dir, "service_rate.png"),
     )
-    plot_attained_service_phases(
-        phases, results_dir,
-        os.path.join(plots_dir, "attained_service.png"),
-    )
-
     print(f"[analyze] All plots written to {plots_dir}/")
 
 
