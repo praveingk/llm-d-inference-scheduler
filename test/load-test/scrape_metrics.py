@@ -9,6 +9,8 @@ Metrics captured (per subsystem prefix):
   {subsystem}_jains_fairness_index
   {subsystem}_ewma_wait_time_milliseconds       per program_id
   {subsystem}_throughput_tokens_per_second       per program_id
+  {subsystem}_service_rate_tokens_per_second     per program_id
+  {subsystem}_attained_service_tokens            per program_id  (program-aware only)
   {subsystem}_queue_score                        per program_id  (program-aware only)
   {subsystem}_requests_total                     per program_id
   {subsystem}_dispatched_total                   per program_id
@@ -89,17 +91,21 @@ def scrape_once(url: str, subsystem: str) -> dict:
     queue_size     = extract_by_label(metrics, "inference_extension_flow_control_queue_size", "fairness_id")
     throughput     = extract_by_label(metrics, f"{subsystem}_throughput_tokens_per_second", "program_id")
     queue_score    = extract_by_label(metrics, f"{subsystem}_queue_score", "program_id")
+    service_rate   = extract_by_label(metrics, f"{subsystem}_service_rate_tokens_per_second", "program_id")
+    attained_svc   = extract_by_label(metrics, f"{subsystem}_attained_service_tokens", "program_id")
 
     # Build per-program dict keyed by all seen program IDs.
-    all_ids = set(ewma_wait) | set(requests) | set(dispatched) | set(queue_score) | set(throughput)
+    all_ids = set(ewma_wait) | set(requests) | set(dispatched) | set(queue_score) | set(throughput) | set(service_rate) | set(attained_svc)
     per_program = {
         pid: {
-            "ewma_wait_ms":   ewma_wait.get(pid),
-            "throughput_tps": throughput.get(pid),
-            "requests":       requests.get(pid),
-            "dispatched":     dispatched.get(pid),
-            "queue_size":     queue_size.get(pid),  # matches when fairness_id == program name
-            "queue_score":    queue_score.get(pid),
+            "ewma_wait_ms":      ewma_wait.get(pid),
+            "throughput_tps":    throughput.get(pid),
+            "service_rate_tps":  service_rate.get(pid),
+            "attained_service":  attained_svc.get(pid),
+            "requests":          requests.get(pid),
+            "dispatched":        dispatched.get(pid),
+            "queue_size":        queue_size.get(pid),  # matches when fairness_id == program name
+            "queue_score":       queue_score.get(pid),
         }
         for pid in sorted(all_ids)
     }

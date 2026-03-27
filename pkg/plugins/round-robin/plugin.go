@@ -160,16 +160,15 @@ func (p *roundRobin) Pick(
 	return nil, nil //nolint:nilnil
 }
 
-// computeFairnessIndex returns Jain's Fairness Index over the average per-request
-// throughput (tokens/sec) for each program. Throughput directly measures what each
-// program is getting from the system, making it a better fairness signal than wait time.
-// Returns 1.0 when fewer than 2 programs have throughput data.
+// computeFairnessIndex returns Jain's Fairness Index over the service rate
+// (weighted tokens/sec) for each program. Equal service rates = perfect fairness.
+// Returns 1.0 when fewer than 2 programs have rate data.
 func (p *roundRobin) computeFairnessIndex() float64 {
 	var sum, sumSq float64
 	var n float64
 	p.programMetrics.Range(func(_, value any) bool {
 		m := value.(*ProgramMetrics)
-		x := m.AverageThroughput()
+		x := m.ServiceRate()
 		if x == 0 {
 			return true
 		}

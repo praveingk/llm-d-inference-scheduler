@@ -3,9 +3,16 @@ package roundrobin
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
-const ewmaAlpha = 0.2
+const ewmaAlpha = 0.5
+
+// Token cost weights: output tokens are ~2× more expensive than input tokens
+const (
+	weightInputToken  = 1
+	weightOutputToken = 2
+)
 
 // ProgramMetrics holds aggregated metrics for a single program (identified by its fairness ID).
 // All methods are goroutine-safe.
@@ -19,6 +26,11 @@ type ProgramMetrics struct {
 	// Per-request throughput tracking: tokens/sec per completed request.
 	throughputSum   float64 // sum of per-request tokens/sec values
 	throughputCount int64   // number of throughput observations
+
+	// Service rate: EWMA of weighted tokens per second, updated on each completion.
+	// Used for Jain's fairness index (equalizing rates across programs = fair).
+	serviceRate        float64
+	lastCompletionTime time.Time
 
 	totalRequests     atomic.Int64
 	dispatchedCount   atomic.Int64
@@ -99,6 +111,35 @@ func (m *ProgramMetrics) AverageThroughput() float64 {
 		return 0
 	}
 	return m.throughputSum / float64(m.throughputCount)
+}
+
+// RecordServiceRate updates the EWMA of service rate (weighted tokens/sec)
+// using the elapsed time since the last completion.
+func (m *ProgramMetrics) RecordServiceRate(weightedTokens float64, now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lastCompletionTime.IsZero() {
+		m.lastCompletionTime = now
+		return // no rate from a single point
+	}
+	elapsed := now.Sub(m.lastCompletionTime).Seconds()
+	if elapsed <= 0 {
+		return
+	}
+	instantRate := weightedTokens / elapsed
+	if m.serviceRate == 0 {
+		m.serviceRate = instantRate
+	} else {
+		m.serviceRate = ewmaAlpha*instantRate + (1-ewmaAlpha)*m.serviceRate
+	}
+	m.lastCompletionTime = now
+}
+
+// ServiceRate returns the EWMA of weighted tokens per second.
+func (m *ProgramMetrics) ServiceRate() float64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.serviceRate
 }
 
 // TotalRequests returns the total number of requests seen for this program.

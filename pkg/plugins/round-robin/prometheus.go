@@ -83,6 +83,15 @@ var (
 		[]string{"program_id"},
 	)
 
+	serviceRateTokensPerSec = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: roundRobinSubsystem,
+			Name:      "service_rate_tokens_per_second",
+			Help:      metricsutil.HelpMsgWithStability("EWMA of weighted tokens per second per program (used for Jain's fairness index)", compbasemetrics.ALPHA),
+		},
+		[]string{"program_id"},
+	)
+
 	ewmaWaitTimeMs = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Subsystem: roundRobinSubsystem,
@@ -105,6 +114,7 @@ func GetCollectors() []prometheus.Collector {
 		pickLatencyUs,
 		fairnessIndex,
 		throughputTokensPerSec,
+		serviceRateTokensPerSec,
 		ewmaWaitTimeMs,
 	}
 }

@@ -108,9 +108,14 @@ func (p *roundRobin) ResponseComplete(ctx context.Context, request *scheduling.L
 			}
 		}
 
+		// Update service rate for fairness index (weighted tokens/sec EWMA).
+		cost := float64(weightInputToken*promptTokens + weightOutputToken*completionTokens)
+		metrics.RecordServiceRate(cost, time.Now())
+		serviceRateTokensPerSec.WithLabelValues(programID).Set(metrics.ServiceRate())
+
 		log.FromContext(ctx).V(logutil.TRACE).Info("ResponseComplete: recorded tokens",
 			"requestId", request.RequestId, "programId", programID,
 			"promptTokens", promptTokens, "completionTokens", completionTokens,
-			"avgThroughput", metrics.AverageThroughput())
+			"serviceRate", metrics.ServiceRate())
 	}
 }
