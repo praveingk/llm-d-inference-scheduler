@@ -2,7 +2,7 @@
 """
 Post-run analysis for test/load-test.
 
-Reads per-phase results.jsonl and metrics.jsonl, produces 9 comparison plots:
+Reads per-phase results.jsonl and metrics.jsonl, produces 10 comparison plots:
   1. latency.png            — P50/P95/P99 end-to-end latency bar chart per program x phase
   2. fairness_index.png     — Jain's fairness index over time, all phases overlaid
   3. wait_time_phases.png   — Per-program EWMA wait time over time, one subplot per phase
@@ -12,6 +12,7 @@ Reads per-phase results.jsonl and metrics.jsonl, produces 9 comparison plots:
   7. program_duration.png   — Total wall-clock duration per program (first send → last complete)
   8. latency_scatter.png    — Program duration vs start time scatter, one subplot per phase
   9. first_request_latency.png — First request latency per program, one subplot per phase
+ 10. queue_depth.png        — Flow-control queue depth per program over time, one subplot per phase
 
 Usage:
     python3 analyze.py results/simple-ab/
@@ -145,63 +146,55 @@ def profile_color_map(program_ids) -> Dict[str, tuple]:
 # ---------------------------------------------------------------------------
 
 def plot_latency(phases: List[str], results_dir: str, out_path: str):
-    # Collect p50/p75/p90/p95/p99 per (phase, program).
-    phase_data = {}
-    all_programs = []
-    for phase in phases:
-        records = load_results(os.path.join(results_dir, phase))
-        groups  = group_latencies_by_program(records)
-        phase_data[phase] = {
-            pid: {
-                "p50": percentile(lats, 50),
-                "p75": percentile(lats, 75),
-                "p90": percentile(lats, 90),
-                "p95": percentile(lats, 95),
-                "p99": percentile(lats, 99),
-            }
-            for pid, lats in groups.items()
-        }
-        for pid in groups:
-            if pid not in all_programs:
-                all_programs.append(pid)
-
-    if not all_programs:
-        print("[analyze] No latency data found, skipping latency.png")
+    n = len(phases)
+    if n == 0:
         return
 
-    all_programs = sorted(all_programs)
-    n_programs   = len(all_programs)
-    n_phases     = len(phases)
+    fig, axes = plt.subplots(n, 1, figsize=(12, 5 * n), squeeze=False)
+    any_data = False
 
-    # Five rows (p50, p75, p90, p95, p99) stacked vertically.
-    fig, axes = plt.subplots(5, 1, figsize=(min(120, max(10, n_programs * 0.5 + 2)), 4 * 5), sharey=False)
-    colors = plt.cm.tab10.colors
+    # Collect all program IDs across phases for consistent coloring.
+    all_pids: set = set()
+    for phase in phases:
+        records = load_results(os.path.join(results_dir, phase))
+        groups = group_latencies_by_program(records)
+        all_pids.update(groups.keys())
+    cmap = profile_color_map(all_pids)
 
-    for ax_idx, pct_label in enumerate(["p50", "p75", "p90", "p95", "p99"]):
-        ax = axes[ax_idx]
-        x  = range(n_programs)
-        bar_w = 0.8 / max(n_phases, 1)
+    for i, phase in enumerate(phases):
+        ax = axes[i][0]
+        records = load_results(os.path.join(results_dir, phase))
+        groups = group_latencies_by_program(records)
+        if not groups:
+            ax.set_title(phase, fontsize=9)
+            ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
+            continue
 
-        for i, phase in enumerate(phases):
-            vals = [
-                phase_data[phase].get(pid, {}).get(pct_label) or 0
-                for pid in all_programs
-            ]
-            offsets = [xi - 0.4 + (i + 0.5) * bar_w for xi in x]
-            ax.bar(offsets, vals, width=bar_w * 0.9,
-                   label=phase, color=colors[i % len(colors)])
+        seen_profiles: set = set()
+        for pid, lats in sorted(groups.items()):
+            s = sorted(lats)
+            ys = [(j + 1) / len(s) for j in range(len(s))]
+            profile = _extract_profile(pid)
+            label = profile if profile not in seen_profiles else "_nolegend_"
+            seen_profiles.add(profile)
+            ax.plot(s, ys, label=label, color=cmap[profile], linewidth=1.2)
+            any_data = True
 
-        ax.set_title(f"{pct_label.upper()} Latency (ms)")
-        ax.set_xticks(list(x))
-        ax.set_xticklabels(all_programs, rotation=30, ha="right", fontsize=8)
-        ax.set_ylabel("Latency (ms)")
-        ax.legend(fontsize=7)
-        ax.yaxis.set_minor_locator(ticker.AutoMinorLocator())
-        ax.grid(axis="y", alpha=0.3)
+        ax.set_title(phase, fontsize=9)
+        ax.set_xlabel("Latency (ms)")
+        ax.set_ylabel("CDF")
+        ax.set_ylim(0, 1.05)
+        ax.legend(fontsize=7, loc="upper left", bbox_to_anchor=(1.02, 1.0), ncol=1)
+        ax.grid(alpha=0.3)
 
-    fig.suptitle("End-to-End Request Latency by Program and Phase", fontsize=11)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
+    if not any_data:
+        print("[analyze] No latency data found, skipping latency.png")
+        plt.close(fig)
+        return
+
+    fig.suptitle("End-to-End Request Latency CDF by Program", fontsize=11)
+    fig.tight_layout(rect=[0, 0, 0.75, 1])
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"[analyze] Wrote {out_path}")
 
@@ -792,6 +785,77 @@ def plot_first_request_latency(phases: List[str], results_dir: str, out_path: st
 
 
 # ---------------------------------------------------------------------------
+# Plot 11: Flow-control queue depth per program — one subplot per phase
+# ---------------------------------------------------------------------------
+
+def plot_queue_depth_phases(phases: List[str], results_dir: str, out_path: str):
+    n = len(phases)
+    if n == 0:
+        return
+
+    fig, axes = plt.subplots(n, 1, figsize=(12, 5 * n), squeeze=False)
+    any_data = False
+
+    # Collect all program IDs across phases for consistent coloring.
+    all_pids: set = set()
+    for phase in phases:
+        records = load_metrics(os.path.join(results_dir, phase))
+        for r in records:
+            all_pids.update(r.get("per_program", {}).keys())
+    cmap = profile_color_map(all_pids)
+
+    for i, phase in enumerate(phases):
+        ax = axes[i][0]
+        records = load_metrics(os.path.join(results_dir, phase))
+        if not records:
+            ax.set_title(phase, fontsize=9)
+            ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
+            continue
+
+        t0 = records[0]["ts"]
+        program_series: Dict[str, list] = {}
+        for r in records:
+            t = r["ts"] - t0
+            for pid, pdata in r.get("per_program", {}).items():
+                qs = pdata.get("queue_size")
+                if qs is not None:
+                    program_series.setdefault(pid, []).append((t, qs))
+
+        if not program_series:
+            ax.set_title(phase, fontsize=9)
+            ax.text(0.5, 0.5, "no queue depth data", ha="center", va="center",
+                    transform=ax.transAxes, color="grey", fontsize=10)
+            continue
+
+        seen_profiles: set = set()
+        for pid, series in sorted(program_series.items()):
+            xs, ys = zip(*series)
+            profile = _extract_profile(pid)
+            label = profile if profile not in seen_profiles else "_nolegend_"
+            seen_profiles.add(profile)
+            ax.plot(xs, ys, label=label, color=cmap[profile], linewidth=1.2)
+            any_data = True
+
+        ax.set_title(phase, fontsize=9)
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Queue Depth")
+        ax.legend(fontsize=7, loc="upper left", bbox_to_anchor=(1.02, 1.0), ncol=1)
+        ax.grid(alpha=0.3)
+
+    if not any_data:
+        print("[analyze] No queue depth data found, skipping queue_depth.png")
+        plt.close(fig)
+        return
+
+    fig.suptitle("Flow-Control Queue Depth Per Program Over Time", fontsize=11)
+    fig.subplots_adjust(right=0.75)
+    fig.tight_layout(rect=[0, 0, 0.75, 1])
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[analyze] Wrote {out_path}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -850,6 +914,10 @@ def main():
     plot_first_request_latency(
         phases, results_dir,
         os.path.join(plots_dir, "first_request_latency.png"),
+    )
+    plot_queue_depth_phases(
+        phases, results_dir,
+        os.path.join(plots_dir, "queue_depth.png"),
     )
 
     print(f"[analyze] All plots written to {plots_dir}/")
