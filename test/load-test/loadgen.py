@@ -116,13 +116,18 @@ async def run_program(
     async def send_one():
         sent_at = time.time()
         stats.in_flight += 1
+        error_response = None
         try:
             req_timeout = aiohttp.ClientTimeout(total=program.request_timeout)
             async with session.post(url, json=body, headers=headers, timeout=req_timeout) as resp:
-                resp_data = await resp.json(content_type=None)
+                resp_text = await resp.text()
                 completed_at = time.time()
                 latency_ms = (completed_at - sent_at) * 1000
-                if resp.status == 200:
+                try:
+                    resp_data = json.loads(resp_text)
+                except (json.JSONDecodeError, ValueError):
+                    resp_data = None
+                if resp.status == 200 and resp_data is not None:
                     stats.ok += 1
                     stats.latencies.append(latency_ms)
                     status = "ok"
@@ -130,19 +135,23 @@ async def run_program(
                 else:
                     stats.err += 1
                     status = f"http_{resp.status}"
+                    if resp_data is None:
+                        status += ":json_decode_error"
                     actual_output_tokens = 0
+                    error_response = resp_text
         except Exception as e:
             completed_at = time.time()
             latency_ms = (completed_at - sent_at) * 1000
             stats.err += 1
             status = f"error:{type(e).__name__}"
             actual_output_tokens = 0
+            error_response = str(e)
         finally:
             stats.in_flight -= 1
             sem.release()
 
         if record_results:
-            results.append({
+            rec = {
                 "program_id": program.name,
                 "sent_at": sent_at,
                 "completed_at": completed_at,
@@ -150,7 +159,10 @@ async def run_program(
                 "status": status,
                 "prompt_tokens": program.prompt_tokens,
                 "output_tokens": actual_output_tokens,
-            })
+            }
+            if error_response is not None:
+                rec["error_response"] = error_response
+            results.append(rec)
 
     pending: List[asyncio.Task] = []
     for _ in range(program.total_requests):
