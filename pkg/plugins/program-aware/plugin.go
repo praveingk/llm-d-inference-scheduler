@@ -78,6 +78,10 @@ type Config struct {
 	// When set (> 0), overrides ServiceDecayFactor with wall-clock based decay.
 	// Example: 30 = service halves every 30s regardless of Pick() frequency.
 	ServiceHalfLifeSeconds *float64 `json:"serviceHalfLifeSeconds,omitempty"`
+
+	// PickLogFile, when set to a non-empty path, enables JSONL logging of
+	// every Pick() decision to the specified file. Disabled by default.
+	PickLogFile string `json:"pickLogFile,omitempty"`
 }
 
 // Compile-time interface assertions.
@@ -103,9 +107,18 @@ func ProgramAwarePluginFactory(name string, rawCfg json.RawMessage, _ plugin.Han
 	if err != nil {
 		return nil, fmt.Errorf("%s plugin %q: %w", ProgramAwarePluginType, name, err)
 	}
+	var logger *PickLogger
+	if cfg.PickLogFile != "" {
+		logger, err = NewPickLogger(cfg.PickLogFile)
+		if err != nil {
+			return nil, fmt.Errorf("%s plugin %q: failed to open pick log file %q: %w",
+				ProgramAwarePluginType, name, cfg.PickLogFile, err)
+		}
+	}
 	return &ProgramAwarePlugin{
-		name:     name,
-		strategy: strategy,
+		name:       name,
+		strategy:   strategy,
+		pickLogger: logger,
 	}, nil
 }
 
@@ -128,6 +141,9 @@ type ProgramAwarePlugin struct {
 	// used to compute flow-control queue wait time in PreRequest.
 	// Key: request ID (string), Value: time.Time.
 	requestTimestamps sync.Map
+
+	// pickLogger writes JSONL pick decisions. nil when logging is disabled.
+	pickLogger *PickLogger
 }
 
 // TypedName returns the plugin type and instance name.
@@ -255,6 +271,44 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 	}
 
 	fairnessIndex.Set(p.computeFairnessIndex())
+
+	// --- JSONL pick logging ---
+	if p.pickLogger != nil && bestQueue != nil {
+		candidates := make([]PickLogCandidate, len(entries))
+		for i, e := range entries {
+			programID := e.queue.FlowKey().ID
+			metrics := p.getOrCreateMetrics(programID)
+			norm := make([]float64, numDims)
+			for d := range numDims {
+				norm[d] = strategy.NormalizeDimension(d, e.raw[d], dimMin[d], dimMax[d])
+			}
+			candidates[i] = PickLogCandidate{
+				ProgramID:        programID,
+				QueueDepth:       e.queue.Len(),
+				RawValues:        e.raw,
+				NormalizedValues: norm,
+				Score:            strategy.Score(norm),
+				Metrics: PickLogMetrics{
+					AttainedService:   metrics.AttainedService(),
+					AverageWaitTime:   metrics.AverageWaitTime(),
+					TotalRequests:     metrics.TotalRequests(),
+					DispatchedCount:   metrics.DispatchedCount(),
+					TotalInputTokens:  metrics.TotalInputTokens(),
+					TotalOutputTokens: metrics.TotalOutputTokens(),
+					DeficitTokens:     metrics.Deficit(),
+					ServiceRate:       metrics.ServiceRate(),
+				},
+			}
+		}
+		_ = p.pickLogger.Log(PickLogEntry{
+			Timestamp:     start,
+			Strategy:      strategy.Name(),
+			WinnerID:      bestQueue.FlowKey().ID,
+			PickLatencyUs: time.Since(start).Microseconds(),
+			Candidates:    candidates,
+		})
+	}
+
 
 	return bestQueue, nil
 }
