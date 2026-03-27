@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pick Log Visualizer</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2/dist/chartjs-plugin-zoom.min.js"></script>
+<style>
+:root {
+  --bg: #f8f9fa; --bg-card: #ffffff; --text: #1a1a2e; --text-muted: #6c757d;
+  --border: #dee2e6; --accent: #4361ee; --accent-hover: #3a56d4;
+  --winner: #22c55e; --winner-bg: #dcfce7;
+  --nav-bg: #ffffff; --nav-border: #e5e7eb;
+  --drop-border: #4361ee; --drop-bg: #f0f4ff;
+  --table-stripe: #f8f9fa; --table-hover: #e9ecef;
+}
+:root.dark {
+  --bg: #0f172a; --bg-card: #1e293b; --text: #e2e8f0; --text-muted: #94a3b8;
+  --border: #334155; --accent: #818cf8; --accent-hover: #a5b4fc;
+  --winner: #4ade80; --winner-bg: #14532d;
+  --nav-bg: #1e293b; --nav-border: #334155;
+  --drop-border: #818cf8; --drop-bg: #1e1b4b;
+  --table-stripe: #1e293b; --table-hover: #334155;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+  background: var(--bg); color: var(--text);
+  min-height: 100vh;
+}
+.hidden { display: none !important; }
+
+/* Nav */
+.top-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  background: var(--nav-bg); border-bottom: 1px solid var(--nav-border);
+  padding: 0 1rem; height: 48px; position: sticky; top: 0; z-index: 100;
+}
+.top-bar h1 { font-size: 0.9rem; font-weight: 600; white-space: nowrap; }
+.top-bar .controls { display: flex; gap: 0.5rem; align-items: center; }
+.top-bar button {
+  background: none; border: 1px solid var(--border); border-radius: 4px;
+  color: var(--text); cursor: pointer; padding: 4px 10px; font-size: 0.75rem;
+}
+.top-bar button:hover { background: var(--table-hover); }
+
+.tabs {
+  display: flex; gap: 0; background: var(--nav-bg);
+  border-bottom: 1px solid var(--nav-border);
+  padding: 0 1rem; position: sticky; top: 48px; z-index: 99;
+}
+.tab-btn {
+  background: none; border: none; border-bottom: 2px solid transparent;
+  color: var(--text-muted); cursor: pointer; padding: 0.6rem 1.2rem;
+  font-size: 0.8rem; font-weight: 500; transition: all 0.15s;
+}
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* File loader */
+#file-loader {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  min-height: calc(100vh - 97px); padding: 2rem;
+}
+#drop-zone {
+  border: 2px dashed var(--drop-border); border-radius: 12px;
+  background: var(--drop-bg); padding: 3rem 4rem; text-align: center;
+  cursor: pointer; transition: all 0.2s; max-width: 500px; width: 100%;
+}
+#drop-zone.dragover { border-color: var(--accent); background: var(--accent); opacity: 0.8; }
+#drop-zone h2 { font-size: 1.1rem; margin-bottom: 0.5rem; }
+#drop-zone p { color: var(--text-muted); font-size: 0.8rem; margin-bottom: 1rem; }
+#drop-zone input[type="file"] { display: none; }
+#drop-zone label {
+  display: inline-block; background: var(--accent); color: #fff; border-radius: 6px;
+  padding: 8px 20px; cursor: pointer; font-size: 0.8rem;
+}
+#drop-zone label:hover { background: var(--accent-hover); }
+#loading-indicator {
+  margin-top: 1.5rem; font-size: 0.85rem; color: var(--text-muted);
+}
+
+/* Views */
+.view { padding: 1rem; max-width: 1400px; margin: 0 auto; }
+.card {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 8px; padding: 1rem; margin-bottom: 1rem;
+}
+.card h3 { font-size: 0.85rem; margin-bottom: 0.75rem; color: var(--text-muted); }
+.stats-row {
+  display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem;
+}
+.stat-box {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0.75rem 1rem; flex: 1; min-width: 150px;
+}
+.stat-box .label { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; }
+.stat-box .value { font-size: 1.2rem; font-weight: 700; margin-top: 0.25rem; }
+.chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+.chart-wrap { position: relative; height: 280px; }
+.chart-wrap-full { position: relative; height: 320px; }
+
+/* Tables */
+table { width: 100%; border-collapse: collapse; font-size: 0.75rem; }
+th, td { padding: 0.35rem 0.5rem; text-align: left; border-bottom: 1px solid var(--border); }
+th { font-weight: 600; color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase; }
+tr:nth-child(even) { background: var(--table-stripe); }
+tr.winner-row { background: var(--winner-bg) !important; }
+td.mono { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.72rem; }
+
+/* Pick detail */
+.pick-nav {
+  display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem; flex-wrap: wrap;
+}
+.pick-nav button {
+  background: var(--accent); color: #fff; border: none; border-radius: 4px;
+  padding: 6px 14px; cursor: pointer; font-size: 0.8rem;
+}
+.pick-nav button:hover { background: var(--accent-hover); }
+.pick-nav button:disabled { opacity: 0.4; cursor: not-allowed; }
+.pick-nav input[type="number"] {
+  width: 80px; padding: 5px 8px; border: 1px solid var(--border);
+  border-radius: 4px; background: var(--bg-card); color: var(--text);
+  font-size: 0.8rem;
+}
+.pick-nav input[type="range"] { flex: 1; min-width: 200px; }
+.pick-nav .pick-count { font-size: 0.75rem; color: var(--text-muted); }
+.info-row {
+  display: flex; gap: 1.5rem; flex-wrap: wrap; margin-bottom: 1rem;
+  font-size: 0.8rem;
+}
+.info-row .info-label { color: var(--text-muted); font-size: 0.7rem; }
+.info-row .info-value { font-weight: 600; }
+.detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+
+/* Compare */
+.compare-selectors { display: flex; gap: 1rem; margin-bottom: 1rem; align-items: center; }
+.compare-selectors select {
+  padding: 6px 10px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--bg-card); color: var(--text); font-size: 0.8rem;
+}
+.compare-selectors span { font-size: 0.8rem; color: var(--text-muted); }
+
+@media (max-width: 900px) {
+  .chart-grid, .detail-grid { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<!-- Top bar -->
+<div class="top-bar">
+  <h1>Pick Log Visualizer</h1>
+  <div class="controls">
+    <button id="btn-reset" class="hidden" onclick="resetAll()">Load Another File</button>
+    <button onclick="toggleTheme()">Theme</button>
+  </div>
+</div>
+
+<!-- Tabs -->
+<div class="tabs hidden" id="tab-bar">
+  <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
+  <button class="tab-btn" data-tab="timeline">Timeline</button>
+  <button class="tab-btn" data-tab="pick-detail">Pick Detail</button>
+  <button class="tab-btn" data-tab="compare">Compare</button>
+</div>
+
+<!-- File Loader -->
+<div id="file-loader">
+  <div id="drop-zone">
+    <h2>Load pick.jsonl</h2>
+    <p>Drag & drop your pick log file here, or click to browse</p>
+    <label for="file-input">Choose File</label>
+    <input type="file" id="file-input" accept=".jsonl,.json,.txt">
+  </div>
+  <div id="loading-indicator" class="hidden">Parsing...</div>
+</div>
+
+<!-- Dashboard -->
+<div id="view-dashboard" class="view hidden">
+  <div class="stats-row" id="stats-row"></div>
+  <div class="chart-grid">
+    <div class="card">
+      <h3>Winner Distribution</h3>
+      <div class="chart-wrap"><canvas id="chart-winners"></canvas></div>
+    </div>
+    <div class="card">
+      <h3>Pick Latency (us)</h3>
+      <div class="chart-wrap"><canvas id="chart-latency"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<!-- Timeline -->
+<div id="view-timeline" class="view hidden">
+  <div class="card">
+    <h3>Score Over Time (click to inspect pick)</h3>
+    <div class="chart-wrap-full"><canvas id="chart-tl-score"></canvas></div>
+  </div>
+  <div class="card">
+    <h3>Queue Depth Over Time</h3>
+    <div class="chart-wrap-full"><canvas id="chart-tl-queue"></canvas></div>
+  </div>
+  <div class="chart-grid">
+    <div class="card">
+      <h3>Attained Service Over Time</h3>
+      <div class="chart-wrap"><canvas id="chart-tl-service"></canvas></div>
+    </div>
+    <div class="card">
+      <h3>Service Rate Over Time</h3>
+      <div class="chart-wrap"><canvas id="chart-tl-rate"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<!-- Pick Detail -->
+<div id="view-pick-detail" class="view hidden">
+  <div class="pick-nav">
+    <button id="btn-prev" onclick="navPick(-1)">Prev</button>
+    <input type="number" id="pick-input" min="0" value="0" onchange="goToPick(this.value)">
+    <input type="range" id="pick-slider" min="0" value="0" oninput="goToPick(this.value)">
+    <button id="btn-next" onclick="navPick(1)">Next</button>
+    <span class="pick-count" id="pick-count"></span>
+  </div>
+  <div class="info-row" id="pick-info"></div>
+  <div class="detail-grid">
+    <div class="card">
+      <h3>Candidate Scores</h3>
+      <div class="chart-wrap"><canvas id="chart-pick-scores"></canvas></div>
+    </div>
+    <div class="card">
+      <h3>Winner Score History (last 50)</h3>
+      <div style="height:80px;position:relative;margin-bottom:0.5rem"><canvas id="chart-sparkline"></canvas></div>
+      <div id="candidates-table-wrap"></div>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Metrics Snapshot</h3>
+    <div id="metrics-table-wrap" style="overflow-x:auto"></div>
+  </div>
+</div>
+
+<!-- Compare -->
+<div id="view-compare" class="view hidden">
+  <div class="compare-selectors">
+    <span>Program A:</span>
+    <select id="cmp-a" onchange="renderCompare()"></select>
+    <span>Program B:</span>
+    <select id="cmp-b" onchange="renderCompare()"></select>
+  </div>
+  <div class="chart-grid">
+    <div class="card">
+      <h3>Score</h3>
+      <div class="chart-wrap"><canvas id="chart-cmp-score"></canvas></div>
+    </div>
+    <div class="card">
+      <h3>Queue Depth</h3>
+      <div class="chart-wrap"><canvas id="chart-cmp-queue"></canvas></div>
+    </div>
+    <div class="card">
+      <h3>Attained Service</h3>
+      <div class="chart-wrap"><canvas id="chart-cmp-service"></canvas></div>
+    </div>
+    <div class="card">
+      <h3>Service Rate</h3>
+      <div class="chart-wrap"><canvas id="chart-cmp-rate"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// =========================================================================
+// State
+// =========================================================================
+const STATE = {
+  picks: [],
+  programIds: [],
+  colorMap: {},
+  profileMap: {},
+  strategy: '',
+  timeRange: { min: null, max: null },
+  baseTime: 0,
+  timeline: {},       // built after load
+  winsByProgram: {},   // programId -> [pickIndex...]
+  currentPick: 0,
+  charts: {},
+};
+
+const TAB10 = [
+  '#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd',
+  '#8c564b','#e377c2','#7f7f7f','#bcbd22','#17becf'
+];
+
+const MAX_TIMELINE_POINTS = 2000;
+
+// =========================================================================
+// Utilities
+// =========================================================================
+function extractProfile(pid) {
+  if (!pid.startsWith('fg-')) return pid;
+  const rest = pid.slice(3);
+  const idx = rest.lastIndexOf('-');
+  if (idx > 0) {
+    const suffix = rest.slice(idx + 1);
+    if (/^\d+$/.test(suffix)) return rest.slice(0, idx);
+  }
+  return rest;
+}
+
+function fmtNum(n) {
+  if (n == null) return '-';
+  if (typeof n === 'number' && !Number.isInteger(n)) return n.toFixed(2);
+  return n.toLocaleString();
+}
+
+function fmtTime(d) {
+  return d.toISOString().replace('T', ' ').replace('Z', '').slice(0, 23);
+}
+
+function relSec(ts) {
+  return (ts.getTime() - STATE.baseTime) / 1000;
+}
+
+// =========================================================================
+// Theme
+// =========================================================================
+function toggleTheme() {
+  document.documentElement.classList.toggle('dark');
+  localStorage.setItem('pick-viz-dark', document.documentElement.classList.contains('dark'));
+  // Rebuild visible charts with new colors
+  const active = document.querySelector('.tab-btn.active');
+  if (active) rebuildTab(active.dataset.tab);
+}
+(function initTheme() {
+  if (localStorage.getItem('pick-viz-dark') === 'true') document.documentElement.classList.add('dark');
+})();
+
+// =========================================================================
+// File Loading
+// =========================================================================
+const dropZone = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault(); dropZone.classList.remove('dragover');
+  if (e.dataTransfer.files.length) loadFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => { if (fileInput.files.length) loadFile(fileInput.files[0]); });
+
+function loadFile(file) {
+  const indicator = document.getElementById('loading-indicator');
+  indicator.textContent = 'Parsing...';
+  indicator.classList.remove('hidden');
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      parseAndInit(reader.result);
+      indicator.classList.add('hidden');
+      document.getElementById('file-loader').classList.add('hidden');
+      document.getElementById('tab-bar').classList.remove('hidden');
+      document.getElementById('btn-reset').classList.remove('hidden');
+      switchTab('dashboard');
+    } catch (err) {
+      indicator.textContent = 'Error: ' + err.message;
+    }
+  };
+  reader.readAsText(file);
+}
+
+function parseAndInit(text) {
+  const lines = text.split('\n');
+  const picks = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    try {
+      const obj = JSON.parse(line);
+      obj.timestamp = new Date(obj.timestamp);
+      obj._index = picks.length;
+      picks.push(obj);
+    } catch (e) { /* skip malformed */ }
+  }
+  if (picks.length === 0) throw new Error('No valid pick entries found');
+
+  STATE.picks = picks;
+  STATE.strategy = picks[0].strategy || 'service';
+  STATE.baseTime = picks[0].timestamp.getTime();
+  STATE.timeRange = { min: picks[0].timestamp, max: picks[picks.length - 1].timestamp };
+
+  // Collect program IDs
+  const pidSet = new Set();
+  for (const p of picks) {
+    for (const c of p.candidates) pidSet.add(c.programId);
+  }
+  STATE.programIds = Array.from(pidSet).sort();
+
+  // Color map
+  const profiles = [...new Set(STATE.programIds.map(extractProfile))].sort();
+  STATE.profileMap = {};
+  for (const pid of STATE.programIds) STATE.profileMap[pid] = extractProfile(pid);
+  const profileColors = {};
+  profiles.forEach((p, i) => { profileColors[p] = TAB10[i % TAB10.length]; });
+  STATE.colorMap = {};
+  for (const pid of STATE.programIds) STATE.colorMap[pid] = profileColors[STATE.profileMap[pid]];
+
+  // Wins by program index
+  STATE.winsByProgram = {};
+  for (const pid of STATE.programIds) STATE.winsByProgram[pid] = [];
+  for (let i = 0; i < picks.length; i++) {
+    const wid = picks[i].winnerId;
+    if (STATE.winsByProgram[wid]) STATE.winsByProgram[wid].push(i);
+  }
+
+  // Build timeline data
+  buildTimelineSeries();
+}
+
+// =========================================================================
+// Downsampling & Timeline
+// =========================================================================
+function buildTimelineSeries() {
+  const picks = STATE.picks;
+  const pids = STATE.programIds;
+
+  // Build full-resolution per-program series
+  const full = {};
+  for (const pid of pids) {
+    full[pid] = { time: [], score: [], queue: [], service: [], rate: [] };
+  }
+
+  for (let i = 0; i < picks.length; i++) {
+    const t = relSec(picks[i].timestamp);
+    for (const c of picks[i].candidates) {
+      const s = full[c.programId];
+      if (!s) continue;
+      s.time.push(t);
+      s.score.push(c.score);
+      s.queue.push(c.queueDepth);
+      s.service.push(c.metrics.attainedService);
+      s.rate.push(c.metrics.serviceRate);
+    }
+  }
+
+  // Downsample each
+  STATE.timeline = {};
+  for (const pid of pids) {
+    const f = full[pid];
+    const n = f.time.length;
+    const step = Math.max(1, Math.floor(n / MAX_TIMELINE_POINTS));
+    const ds = { score: [], queue: [], service: [], rate: [] };
+    for (let i = 0; i < n; i += step) {
+      const x = f.time[i];
+      ds.score.push({ x, y: f.score[i] });
+      ds.queue.push({ x, y: f.queue[i] });
+      ds.service.push({ x, y: f.service[i] });
+      ds.rate.push({ x, y: f.rate[i] });
+    }
+    STATE.timeline[pid] = ds;
+  }
+
+  // Winner marker points (on score chart)
+  STATE.timeline._winners = {};
+  for (const pid of pids) STATE.timeline._winners[pid] = [];
+  const step = Math.max(1, Math.floor(picks.length / MAX_TIMELINE_POINTS));
+  for (let i = 0; i < picks.length; i += step) {
+    const p = picks[i];
+    const wc = p.candidates.find(c => c.programId === p.winnerId);
+    if (wc) {
+      STATE.timeline._winners[p.winnerId].push({ x: relSec(p.timestamp), y: wc.score });
+    }
+  }
+}
+
+// =========================================================================
+// Tab Navigation
+// =========================================================================
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+});
+
+function switchTab(tab) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  ['dashboard', 'timeline', 'pick-detail', 'compare'].forEach(v => {
+    document.getElementById('view-' + v).classList.toggle('hidden', v !== tab);
+  });
+  rebuildTab(tab);
+}
+
+function rebuildTab(tab) {
+  if (STATE.picks.length === 0) return;
+  destroyCharts();
+  switch (tab) {
+    case 'dashboard': renderDashboard(); break;
+    case 'timeline': renderTimeline(); break;
+    case 'pick-detail': renderPickDetail(); break;
+    case 'compare': initCompare(); renderCompare(); break;
+  }
+}
+
+function destroyCharts() {
+  for (const key of Object.keys(STATE.charts)) {
+    if (STATE.charts[key]) { STATE.charts[key].destroy(); delete STATE.charts[key]; }
+  }
+}
+
+function resetAll() {
+  destroyCharts();
+  STATE.picks = []; STATE.programIds = []; STATE.colorMap = {};
+  STATE.timeline = {}; STATE.winsByProgram = {}; STATE.currentPick = 0;
+  document.getElementById('file-loader').classList.remove('hidden');
+  document.getElementById('tab-bar').classList.add('hidden');
+  document.getElementById('btn-reset').classList.add('hidden');
+  ['dashboard', 'timeline', 'pick-detail', 'compare'].forEach(v => {
+    document.getElementById('view-' + v).classList.add('hidden');
+  });
+  document.getElementById('file-input').value = '';
+}
+
+// =========================================================================
+// Common chart options
+// =========================================================================
+function baseOpts(title) {
+  return {
+    animation: false, responsive: true, maintainAspectRatio: false,
+    interaction: { mode: 'nearest', intersect: false },
+    plugins: {
+      legend: { position: 'top', labels: { boxWidth: 10, font: { size: 10 } } },
+      title: title ? { display: true, text: title, font: { size: 12 } } : undefined,
+    },
+  };
+}
+
+function timeAxis() {
+  return { type: 'linear', title: { display: true, text: 'Time (s)', font: { size: 10 } } };
+}
+
+// =========================================================================
+// Dashboard
+// =========================================================================
+function renderDashboard() {
+  const picks = STATE.picks;
+  const dur = ((STATE.timeRange.max - STATE.timeRange.min) / 1000).toFixed(1);
+
+  // Stats row
+  const statsHtml = [
+    { label: 'Total Picks', value: fmtNum(picks.length) },
+    { label: 'Duration', value: dur + 's' },
+    { label: 'Strategy', value: STATE.strategy },
+    { label: 'Programs', value: STATE.programIds.length },
+  ].map(s => `<div class="stat-box"><div class="label">${s.label}</div><div class="value">${s.value}</div></div>`).join('');
+  document.getElementById('stats-row').innerHTML = statsHtml;
+
+  // Winner distribution
+  const winCounts = {};
+  for (const pid of STATE.programIds) winCounts[pid] = 0;
+  for (const p of picks) { if (winCounts[p.winnerId] !== undefined) winCounts[p.winnerId]++; }
+  const sorted = Object.entries(winCounts).sort((a, b) => b[1] - a[1]);
+  const labels = sorted.map(e => e[0]);
+  const counts = sorted.map(e => e[1]);
+  const colors = labels.map(l => STATE.colorMap[l]);
+
+  STATE.charts.winners = new Chart(document.getElementById('chart-winners'), {
+    type: 'bar',
+    data: { labels, datasets: [{ data: counts, backgroundColor: colors, borderWidth: 0 }] },
+    options: {
+      ...baseOpts(), indexAxis: 'y',
+      plugins: { ...baseOpts().plugins, legend: { display: false } },
+      scales: { x: { title: { display: true, text: 'Win Count', font: { size: 10 } } } },
+    },
+  });
+
+  // Latency histogram
+  const latencies = picks.map(p => p.pickLatencyUs);
+  const maxLat = Math.max(...latencies);
+  const binCount = Math.min(50, Math.max(10, Math.ceil(Math.sqrt(latencies.length))));
+  const binSize = Math.max(1, Math.ceil(maxLat / binCount));
+  const bins = new Array(binCount).fill(0);
+  const binLabels = [];
+  for (let i = 0; i < binCount; i++) binLabels.push(i * binSize);
+  for (const l of latencies) { const idx = Math.min(binCount - 1, Math.floor(l / binSize)); bins[idx]++; }
+
+  STATE.charts.latency = new Chart(document.getElementById('chart-latency'), {
+    type: 'bar',
+    data: {
+      labels: binLabels,
+      datasets: [{ data: bins, backgroundColor: 'rgba(67, 97, 238, 0.6)', borderWidth: 0 }],
+    },
+    options: {
+      ...baseOpts(),
+      plugins: { ...baseOpts().plugins, legend: { display: false } },
+      scales: {
+        x: { title: { display: true, text: 'Latency (us)', font: { size: 10 } } },
+        y: { title: { display: true, text: 'Count', font: { size: 10 } } },
+      },
+    },
+  });
+}
+
+// =========================================================================
+// Timeline
+// =========================================================================
+function renderTimeline() {
+  const pids = STATE.programIds;
+  const tl = STATE.timeline;
+
+  function makeLineDatasets(metric) {
+    return pids.map(pid => ({
+      label: pid, data: tl[pid][metric],
+      borderColor: STATE.colorMap[pid], borderWidth: 1.5,
+      pointRadius: 0, tension: 0, fill: false,
+    }));
+  }
+
+  function makeChart(canvasId, metric, yLabel, extra) {
+    const datasets = makeLineDatasets(metric);
+    if (extra) datasets.push(...extra);
+    STATE.charts[canvasId] = new Chart(document.getElementById(canvasId), {
+      type: 'line',
+      data: { datasets },
+      options: {
+        ...baseOpts(), parsing: false, normalized: true,
+        scales: { x: timeAxis(), y: { title: { display: true, text: yLabel, font: { size: 10 } } } },
+        plugins: {
+          ...baseOpts().plugins,
+          zoom: {
+            pan: { enabled: true, mode: 'x' },
+            zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' },
+          },
+        },
+        onClick: metric === 'score' ? handleTimelineClick : undefined,
+      },
+    });
+  }
+
+  // Score chart with winner markers
+  const winnerDatasets = pids.map(pid => ({
+    type: 'scatter', label: pid + ' (win)', data: tl._winners[pid],
+    backgroundColor: STATE.colorMap[pid], borderColor: '#fff', borderWidth: 1,
+    pointRadius: 3, pointStyle: 'circle', showLine: false,
+  })).filter(ds => ds.data.length > 0);
+
+  makeChart('chart-tl-score', 'score', 'Score', winnerDatasets);
+  makeChart('chart-tl-queue', 'queue', 'Queue Depth');
+  makeChart('chart-tl-service', 'service', 'Attained Service');
+  makeChart('chart-tl-rate', 'rate', 'Service Rate (tokens/s)');
+}
+
+function handleTimelineClick(evt, elements) {
+  if (!elements || elements.length === 0) return;
+  const el = elements[0];
+  const ds = STATE.charts['chart-tl-score'].data.datasets[el.datasetIndex];
+  const pt = ds.data[el.index];
+  if (!pt) return;
+  // Find closest pick by time
+  const targetSec = pt.x;
+  let best = 0, bestDiff = Infinity;
+  for (let i = 0; i < STATE.picks.length; i++) {
+    const diff = Math.abs(relSec(STATE.picks[i].timestamp) - targetSec);
+    if (diff < bestDiff) { bestDiff = diff; best = i; }
+  }
+  STATE.currentPick = best;
+  switchTab('pick-detail');
+}
+
+// =========================================================================
+// Pick Detail
+// =========================================================================
+function navPick(delta) {
+  goToPick(STATE.currentPick + delta);
+}
+
+function goToPick(idx) {
+  idx = parseInt(idx, 10);
+  if (isNaN(idx)) idx = 0;
+  STATE.currentPick = Math.max(0, Math.min(STATE.picks.length - 1, idx));
+  renderPickDetail();
+}
+
+document.addEventListener('keydown', e => {
+  if (document.querySelector('#view-pick-detail.hidden')) return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if (e.key === 'ArrowLeft') { navPick(-1); e.preventDefault(); }
+  if (e.key === 'ArrowRight') { navPick(1); e.preventDefault(); }
+});
+
+function renderPickDetail() {
+  const picks = STATE.picks;
+  const idx = STATE.currentPick;
+  const p = picks[idx];
+
+  // Update nav controls
+  document.getElementById('pick-input').value = idx;
+  document.getElementById('pick-input').max = picks.length - 1;
+  document.getElementById('pick-slider').value = idx;
+  document.getElementById('pick-slider').max = picks.length - 1;
+  document.getElementById('btn-prev').disabled = idx === 0;
+  document.getElementById('btn-next').disabled = idx === picks.length - 1;
+  document.getElementById('pick-count').textContent = `Pick ${idx} of ${picks.length - 1}`;
+
+  // Info row
+  const dimLabels = STATE.strategy === 'drr'
+    ? ['Deficit', 'Head Wait (ms)']
+    : ['Attained Service', 'Head Wait (ms)'];
+
+  const elapsed = relSec(p.timestamp);
+  const elapsedStr = elapsed < 60 ? elapsed.toFixed(3) + 's' : (elapsed / 60).toFixed(2) + 'm';
+  document.getElementById('pick-info').innerHTML = [
+    { label: 'Timestamp', value: fmtTime(p.timestamp) },
+    { label: 'Time From Start', value: '+' + elapsedStr },
+    { label: 'Strategy', value: p.strategy },
+    { label: 'Winner', value: p.winnerId },
+    { label: 'Pick Latency', value: p.pickLatencyUs + ' us' },
+    { label: 'Candidates', value: p.candidates.length },
+  ].map(i => `<div><div class="info-label">${i.label}</div><div class="info-value">${i.value}</div></div>`).join('');
+
+  // Score bar chart
+  const sorted = [...p.candidates].sort((a, b) => b.score - a.score);
+  const barLabels = sorted.map(c => c.programId);
+  const barData = sorted.map(c => c.score);
+  const barColors = sorted.map(c => c.programId === p.winnerId ? 'rgba(34,197,94,0.8)' : (STATE.colorMap[c.programId] || '#999') + '99');
+
+  if (STATE.charts['chart-pick-scores']) STATE.charts['chart-pick-scores'].destroy();
+  STATE.charts['chart-pick-scores'] = new Chart(document.getElementById('chart-pick-scores'), {
+    type: 'bar',
+    data: { labels: barLabels, datasets: [{ data: barData, backgroundColor: barColors, borderWidth: 0 }] },
+    options: {
+      ...baseOpts(), indexAxis: 'y',
+      plugins: { ...baseOpts().plugins, legend: { display: false } },
+      scales: { x: { min: 0, title: { display: true, text: 'Score', font: { size: 10 } } } },
+    },
+  });
+
+  // Sparkline - winner score over last 50 picks
+  const winIndices = STATE.winsByProgram[p.winnerId] || [];
+  // Find position of current pick in winIndices (or closest)
+  let winPos = winIndices.length - 1;
+  for (let i = 0; i < winIndices.length; i++) {
+    if (winIndices[i] >= idx) { winPos = i; break; }
+  }
+  const sparkStart = Math.max(0, winPos - 49);
+  const sparkIndices = winIndices.slice(sparkStart, winPos + 1);
+  const sparkData = sparkIndices.map(wi => {
+    const pick = picks[wi];
+    const cand = pick.candidates.find(c => c.programId === p.winnerId);
+    return { x: wi, y: cand ? cand.score : 0 };
+  });
+
+  if (STATE.charts['chart-sparkline']) STATE.charts['chart-sparkline'].destroy();
+  STATE.charts['chart-sparkline'] = new Chart(document.getElementById('chart-sparkline'), {
+    type: 'line',
+    data: {
+      datasets: [
+        {
+          data: sparkData, borderColor: STATE.colorMap[p.winnerId] || '#4361ee',
+          borderWidth: 1.5, pointRadius: 0, tension: 0, fill: false,
+        },
+        {
+          data: [{ x: idx, y: sparkData.length ? sparkData[sparkData.length - 1].y : 0 }],
+          backgroundColor: '#ef4444', borderColor: '#ef4444',
+          pointRadius: 4, showLine: false, type: 'scatter',
+        },
+      ],
+    },
+    options: {
+      animation: false, responsive: true, maintainAspectRatio: false, parsing: false,
+      plugins: { legend: { display: false }, tooltip: { enabled: false } },
+      scales: { x: { display: false }, y: { display: false } },
+    },
+  });
+
+  // Candidates table
+  let thtml = '<table><thead><tr><th></th><th>Program</th><th>Queue</th>';
+  thtml += `<th>${dimLabels[0]} (raw)</th><th>${dimLabels[1]} (raw)</th>`;
+  thtml += '<th>Norm[0]</th><th>Norm[1]</th><th>Score</th></tr></thead><tbody>';
+  for (const c of sorted) {
+    const isWinner = c.programId === p.winnerId;
+    const marker = isWinner ? '<span style="color:var(--winner)">&#9654;</span>' : '';
+    const cls = isWinner ? ' class="winner-row"' : '';
+    thtml += `<tr${cls}>`;
+    thtml += `<td>${marker}</td>`;
+    thtml += `<td>${c.programId}</td>`;
+    thtml += `<td class="mono">${c.queueDepth}</td>`;
+    thtml += `<td class="mono">${fmtNum(c.rawValues[0])}</td>`;
+    thtml += `<td class="mono">${fmtNum(c.rawValues[1])}</td>`;
+    thtml += `<td class="mono">${c.normalizedValues[0]?.toFixed(4) ?? '-'}</td>`;
+    thtml += `<td class="mono">${c.normalizedValues[1]?.toFixed(4) ?? '-'}</td>`;
+    thtml += `<td class="mono" style="font-weight:700">${c.score.toFixed(4)}</td>`;
+    thtml += '</tr>';
+  }
+  thtml += '</tbody></table>';
+  document.getElementById('candidates-table-wrap').innerHTML = thtml;
+
+  // Metrics table (transposed: metrics as rows, programs as columns)
+  const metricKeys = [
+    ['attainedService', 'Attained Service'],
+    ['averageWaitTime', 'Avg Wait Time (ms)'],
+    ['totalRequests', 'Total Requests'],
+    ['dispatchedCount', 'Dispatched'],
+    ['totalInputTokens', 'Input Tokens'],
+    ['totalOutputTokens', 'Output Tokens'],
+    ['deficitTokens', 'Deficit Tokens'],
+    ['serviceRate', 'Service Rate'],
+  ];
+
+  let mhtml = '<table><thead><tr><th>Metric</th>';
+  for (const c of sorted) {
+    const w = c.programId === p.winnerId ? ' style="color:var(--winner);font-weight:700"' : '';
+    mhtml += `<th${w}>${c.programId}</th>`;
+  }
+  mhtml += '</tr></thead><tbody>';
+  for (const [key, label] of metricKeys) {
+    mhtml += `<tr><td style="font-weight:600">${label}</td>`;
+    for (const c of sorted) {
+      mhtml += `<td class="mono">${fmtNum(c.metrics[key])}</td>`;
+    }
+    mhtml += '</tr>';
+  }
+  mhtml += '</tbody></table>';
+  document.getElementById('metrics-table-wrap').innerHTML = mhtml;
+}
+
+// =========================================================================
+// Compare
+// =========================================================================
+function initCompare() {
+  const pids = STATE.programIds;
+  for (const id of ['cmp-a', 'cmp-b']) {
+    const sel = document.getElementById(id);
+    if (sel.options.length > 0) return; // already initialized
+    for (const pid of pids) {
+      const opt = document.createElement('option');
+      opt.value = pid; opt.textContent = pid;
+      sel.appendChild(opt);
+    }
+  }
+  if (pids.length >= 2) document.getElementById('cmp-b').value = pids[1];
+}
+
+function renderCompare() {
+  const pidA = document.getElementById('cmp-a').value;
+  const pidB = document.getElementById('cmp-b').value;
+  if (!pidA || !pidB) return;
+
+  const tl = STATE.timeline;
+  const metrics = ['score', 'queue', 'service', 'rate'];
+  const yLabels = ['Score', 'Queue Depth', 'Attained Service', 'Service Rate'];
+  const chartIds = ['chart-cmp-score', 'chart-cmp-queue', 'chart-cmp-service', 'chart-cmp-rate'];
+
+  for (let i = 0; i < 4; i++) {
+    if (STATE.charts[chartIds[i]]) STATE.charts[chartIds[i]].destroy();
+    STATE.charts[chartIds[i]] = new Chart(document.getElementById(chartIds[i]), {
+      type: 'line',
+      data: {
+        datasets: [
+          {
+            label: pidA, data: tl[pidA] ? tl[pidA][metrics[i]] : [],
+            borderColor: STATE.colorMap[pidA], borderWidth: 1.5,
+            pointRadius: 0, tension: 0, fill: false,
+          },
+          {
+            label: pidB, data: tl[pidB] ? tl[pidB][metrics[i]] : [],
+            borderColor: STATE.colorMap[pidB], borderWidth: 1.5,
+            pointRadius: 0, tension: 0, fill: false,
+          },
+        ],
+      },
+      options: {
+        ...baseOpts(), parsing: false, normalized: true,
+        scales: {
+          x: timeAxis(),
+          y: { title: { display: true, text: yLabels[i], font: { size: 10 } } },
+        },
+        plugins: {
+          ...baseOpts().plugins,
+          zoom: {
+            pan: { enabled: true, mode: 'x' },
+            zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' },
+          },
+        },
+      },
+    });
+  }
+}
+</script>
+</body>
+</html>

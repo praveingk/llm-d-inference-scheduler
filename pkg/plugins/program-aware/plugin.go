@@ -272,17 +272,18 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 
 	fairnessIndex.Set(p.computeFairnessIndex())
 
-	// --- JSONL pick logging ---
+	// --- JSONL pick logging (includes all queues, even empty ones) ---
 	if p.pickLogger != nil && bestQueue != nil {
-		candidates := make([]PickLogCandidate, len(entries))
-		for i, e := range entries {
+		var candidates []PickLogCandidate
+		// Add scored (non-empty) entries.
+		for _, e := range entries {
 			programID := e.queue.FlowKey().ID
 			metrics := p.getOrCreateMetrics(programID)
 			norm := make([]float64, numDims)
 			for d := range numDims {
 				norm[d] = strategy.NormalizeDimension(d, e.raw[d], dimMin[d], dimMax[d])
 			}
-			candidates[i] = PickLogCandidate{
+			candidates = append(candidates, PickLogCandidate{
 				ProgramID:        programID,
 				QueueDepth:       e.queue.Len(),
 				RawValues:        e.raw,
@@ -298,8 +299,41 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 					DeficitTokens:     metrics.Deficit(),
 					ServiceRate:       metrics.ServiceRate(),
 				},
-			}
+			})
 		}
+		// Add empty queues so the visualizer sees all programs at every pick.
+		scoredSet := make(map[string]struct{}, len(entries))
+		for _, e := range entries {
+			scoredSet[e.queue.FlowKey().ID] = struct{}{}
+		}
+		band.IterateQueues(func(queue flowcontrol.FlowQueueAccessor) (keepIterating bool) {
+			if queue == nil {
+				return true
+			}
+			programID := queue.FlowKey().ID
+			if _, ok := scoredSet[programID]; ok {
+				return true // already logged above
+			}
+			metrics := p.getOrCreateMetrics(programID)
+			candidates = append(candidates, PickLogCandidate{
+				ProgramID:        programID,
+				QueueDepth:       0,
+				RawValues:        make([]float64, numDims),
+				NormalizedValues: make([]float64, numDims),
+				Score:            0,
+				Metrics: PickLogMetrics{
+					AttainedService:   metrics.AttainedService(),
+					AverageWaitTime:   metrics.AverageWaitTime(),
+					TotalRequests:     metrics.TotalRequests(),
+					DispatchedCount:   metrics.DispatchedCount(),
+					TotalInputTokens:  metrics.TotalInputTokens(),
+					TotalOutputTokens: metrics.TotalOutputTokens(),
+					DeficitTokens:     metrics.Deficit(),
+					ServiceRate:       metrics.ServiceRate(),
+				},
+			})
+			return true
+		})
 		_ = p.pickLogger.Log(PickLogEntry{
 			Timestamp:     start,
 			Strategy:      strategy.Name(),
