@@ -42,6 +42,7 @@ class ProgramConfig:
     start_time: float       # seconds after measurement start
     request_timeout: float = 60.0  # per-request HTTP timeout
     no_fairness_header: bool = False
+    initial_request_interval: float = 0.0  # seconds between launches for first `concurrency` requests
 
 
 @dataclass
@@ -165,8 +166,11 @@ async def run_program(
             results.append(rec)
 
     pending: List[asyncio.Task] = []
-    for _ in range(program.total_requests):
+    stagger = program.initial_request_interval
+    for i in range(program.total_requests):
         await sem.acquire()
+        if stagger > 0 and 0 < i < program.concurrency:
+            await asyncio.sleep(stagger)
         stats.sent += 1
         pending.append(asyncio.create_task(send_one()))
 
@@ -228,6 +232,7 @@ async def main(scenario_path: str, phase_name: str, gateway: str, output_dir: st
             start_time=float(pc.get("start_time", 0)),
             request_timeout=float(pc.get("request_timeout", 60)),
             no_fairness_header=bool(pc.get("no_fairness_header", False)),
+            initial_request_interval=float(pc.get("initial_request_interval", 0)),
         ))
 
     os.makedirs(output_dir, exist_ok=True)

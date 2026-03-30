@@ -900,7 +900,7 @@ function renderPickDetail() {
     : ['Attained Service', 'Head Wait (ms)'];
 
   const elapsed = relSec(p.timestamp);
-  const elapsedStr = elapsed < 60 ? elapsed.toFixed(3) + 's' : (elapsed / 60).toFixed(2) + 'm';
+  const elapsedStr = elapsed.toFixed(3) + 's';
   document.getElementById('pick-info').innerHTML = [
     { label: 'Timestamp', value: fmtTime(p.timestamp) },
     { label: 'Time From Start', value: '+' + elapsedStr },
