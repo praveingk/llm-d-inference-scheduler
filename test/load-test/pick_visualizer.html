@@ -126,6 +126,26 @@ td.mono { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.72rem; }
 }
 .pick-nav input[type="range"] { flex: 1; min-width: 200px; }
 .pick-nav .pick-count { font-size: 0.75rem; color: var(--text-muted); }
+.nav-sep { color: var(--text-muted); font-size: 0.9rem; user-select: none; }
+#btn-prev-qc, #btn-next-qc {
+  background: transparent; color: var(--accent); border: 1px solid var(--accent);
+}
+#btn-prev-qc:hover, #btn-next-qc:hover { background: var(--accent); color: #fff; }
+#btn-prev-qc:disabled, #btn-next-qc:disabled,
+#btn-prev-de:disabled, #btn-next-de:disabled {
+  opacity: 0.4; cursor: not-allowed; border-color: var(--border);
+  color: var(--text-muted); background: transparent;
+}
+#btn-prev-de, #btn-next-de {
+  background: transparent; color: #f59e0b; border: 1px solid #f59e0b;
+}
+#btn-prev-de:hover, #btn-next-de:hover { background: #f59e0b; color: #fff; }
+.event-timeline-card { padding: 0.5rem 1rem; margin-bottom: 1rem; }
+.event-timeline-card h3 { margin-bottom: 0.4rem; font-size: 0.8rem; }
+#event-timeline, #dispatch-timeline {
+  width: 100%; height: 36px; cursor: pointer; border-radius: 4px;
+  border: 1px solid var(--border);
+}
 .info-row {
   display: flex; gap: 1.5rem; flex-wrap: wrap; margin-bottom: 1rem;
   font-size: 0.8rem;
@@ -221,7 +241,21 @@ td.mono { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.72rem; }
     <input type="number" id="pick-input" min="0" value="0" onchange="goToPick(this.value)">
     <input type="range" id="pick-slider" min="0" value="0" oninput="goToPick(this.value)">
     <button id="btn-next" onclick="navPick(1)">Next</button>
+    <span class="nav-sep">|</span>
+    <button id="btn-prev-qc" onclick="navQueueChange(-1)" title="Previous queue depth change (Shift+Left)">&#9664; Queue Chg</button>
+    <button id="btn-next-qc" onclick="navQueueChange(1)" title="Next queue depth change (Shift+Right)">Queue Chg &#9654;</button>
+    <span class="nav-sep">|</span>
+    <button id="btn-prev-de" onclick="navDispatchEvent(-1)" title="Previous dispatch event (Ctrl+Left)">&#9664; Dispatch</button>
+    <button id="btn-next-de" onclick="navDispatchEvent(1)" title="Next dispatch event (Ctrl+Right)">Dispatch &#9654;</button>
     <span class="pick-count" id="pick-count"></span>
+  </div>
+  <div class="card event-timeline-card" id="event-timeline-card">
+    <h3>Queue Change Events <span class="pick-count" id="qc-count"></span></h3>
+    <canvas id="event-timeline" height="36"></canvas>
+  </div>
+  <div class="card event-timeline-card">
+    <h3>Dispatch Events <span class="pick-count" id="de-count"></span></h3>
+    <canvas id="dispatch-timeline" height="36"></canvas>
   </div>
   <div class="info-row" id="pick-info"></div>
   <div class="detail-grid">
@@ -283,6 +317,8 @@ const STATE = {
   baseTime: 0,
   timeline: {},       // built after load
   winsByProgram: {},   // programId -> [pickIndex...]
+  queueChangeIndices: [], // pick indices where any queue depth changed
+  dispatchEventIndices: [], // pick indices where any queue depth decremented
   currentPick: 0,
   charts: {},
 };
@@ -416,6 +452,34 @@ function parseAndInit(text) {
     if (STATE.winsByProgram[wid]) STATE.winsByProgram[wid].push(i);
   }
 
+  // Pre-compute queue-change and dispatch-event indices
+  STATE.queueChangeIndices = [];
+  STATE.dispatchEventIndices = [];
+  let prevDepths = null;
+  for (let i = 0; i < picks.length; i++) {
+    const cur = {};
+    for (const c of picks[i].candidates) cur[c.programId] = c.queueDepth;
+    if (prevDepths !== null) {
+      const curKeys = Object.keys(cur);
+      const prevKeys = Object.keys(prevDepths);
+      let changed = curKeys.length !== prevKeys.length;
+      let decremented = false;
+      if (!changed) {
+        for (const k of curKeys) {
+          if (cur[k] !== prevDepths[k]) { changed = true; }
+          if (prevDepths[k] !== undefined && cur[k] < prevDepths[k]) { decremented = true; }
+        }
+      } else {
+        for (const k of curKeys) {
+          if (prevDepths[k] !== undefined && cur[k] < prevDepths[k]) { decremented = true; break; }
+        }
+      }
+      if (changed) STATE.queueChangeIndices.push(i);
+      if (decremented) STATE.dispatchEventIndices.push(i);
+    }
+    prevDepths = cur;
+  }
+
   // Build timeline data
   buildTimelineSeries();
 }
@@ -511,7 +575,9 @@ function destroyCharts() {
 function resetAll() {
   destroyCharts();
   STATE.picks = []; STATE.programIds = []; STATE.colorMap = {};
-  STATE.timeline = {}; STATE.winsByProgram = {}; STATE.currentPick = 0;
+  STATE.timeline = {}; STATE.winsByProgram = {};
+  STATE.queueChangeIndices = []; STATE.dispatchEventIndices = [];
+  STATE.currentPick = 0;
   document.getElementById('file-loader').classList.remove('hidden');
   document.getElementById('tab-bar').classList.add('hidden');
   document.getElementById('btn-reset').classList.add('hidden');
@@ -681,11 +747,137 @@ function goToPick(idx) {
   renderPickDetail();
 }
 
+function navQueueChange(direction) {
+  const indices = STATE.queueChangeIndices;
+  if (indices.length === 0) return;
+  const cur = STATE.currentPick;
+  if (direction > 0) {
+    let lo = 0, hi = indices.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (indices[mid] <= cur) lo = mid + 1; else hi = mid; }
+    if (lo < indices.length) goToPick(indices[lo]);
+  } else {
+    let lo = 0, hi = indices.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (indices[mid] < cur) lo = mid + 1; else hi = mid; }
+    if (lo > 0) goToPick(indices[lo - 1]);
+  }
+}
+
+function renderEventTimeline() {
+  const canvas = document.getElementById('event-timeline');
+  const indices = STATE.queueChangeIndices;
+  const totalPicks = STATE.picks.length;
+  document.getElementById('qc-count').textContent = `(${indices.length} events)`;
+
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  const W = rect.width, H = rect.height;
+
+  const isDark = document.documentElement.classList.contains('dark');
+  ctx.fillStyle = isDark ? '#1e293b' : '#f1f5f9';
+  ctx.fillRect(0, 0, W, H);
+
+  // Event markers
+  ctx.fillStyle = isDark ? '#818cf8' : '#4361ee';
+  for (const idx of indices) {
+    const x = (idx / (totalPicks - 1)) * W;
+    ctx.fillRect(x - 0.5, 0, 1.5, H);
+  }
+
+  // Current position
+  const curX = (STATE.currentPick / (totalPicks - 1)) * W;
+  ctx.fillStyle = '#ef4444';
+  ctx.fillRect(curX - 1.5, 0, 3, H);
+}
+
+function navDispatchEvent(direction) {
+  const indices = STATE.dispatchEventIndices;
+  if (indices.length === 0) return;
+  const cur = STATE.currentPick;
+  if (direction > 0) {
+    let lo = 0, hi = indices.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (indices[mid] <= cur) lo = mid + 1; else hi = mid; }
+    if (lo < indices.length) goToPick(indices[lo]);
+  } else {
+    let lo = 0, hi = indices.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (indices[mid] < cur) lo = mid + 1; else hi = mid; }
+    if (lo > 0) goToPick(indices[lo - 1]);
+  }
+}
+
+function renderDispatchTimeline() {
+  const canvas = document.getElementById('dispatch-timeline');
+  const indices = STATE.dispatchEventIndices;
+  const totalPicks = STATE.picks.length;
+  document.getElementById('de-count').textContent = `(${indices.length} events)`;
+
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  const W = rect.width, H = rect.height;
+
+  const isDark = document.documentElement.classList.contains('dark');
+  ctx.fillStyle = isDark ? '#1e293b' : '#f1f5f9';
+  ctx.fillRect(0, 0, W, H);
+
+  // Event markers (amber)
+  ctx.fillStyle = isDark ? '#fbbf24' : '#f59e0b';
+  for (const idx of indices) {
+    const x = (idx / (totalPicks - 1)) * W;
+    ctx.fillRect(x - 0.5, 0, 1.5, H);
+  }
+
+  // Current position
+  const curX = (STATE.currentPick / (totalPicks - 1)) * W;
+  ctx.fillStyle = '#ef4444';
+  ctx.fillRect(curX - 1.5, 0, 3, H);
+}
+
+document.getElementById('dispatch-timeline').addEventListener('click', function(e) {
+  const rect = this.getBoundingClientRect();
+  const xRatio = (e.clientX - rect.left) / rect.width;
+  const targetIdx = Math.round(xRatio * (STATE.picks.length - 1));
+  const indices = STATE.dispatchEventIndices;
+  if (indices.length === 0) { goToPick(targetIdx); return; }
+  let lo = 0, hi = indices.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (indices[mid] < targetIdx) lo = mid + 1; else hi = mid; }
+  let best = lo < indices.length ? indices[lo] : indices[lo - 1];
+  if (lo > 0 && lo < indices.length) {
+    best = Math.abs(indices[lo - 1] - targetIdx) <= Math.abs(indices[lo] - targetIdx) ? indices[lo - 1] : indices[lo];
+  }
+  goToPick(best);
+});
+
+document.getElementById('event-timeline').addEventListener('click', function(e) {
+  const rect = this.getBoundingClientRect();
+  const xRatio = (e.clientX - rect.left) / rect.width;
+  const targetIdx = Math.round(xRatio * (STATE.picks.length - 1));
+  const indices = STATE.queueChangeIndices;
+  if (indices.length === 0) { goToPick(targetIdx); return; }
+  let lo = 0, hi = indices.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (indices[mid] < targetIdx) lo = mid + 1; else hi = mid; }
+  let best = lo < indices.length ? indices[lo] : indices[lo - 1];
+  if (lo > 0 && lo < indices.length) {
+    best = Math.abs(indices[lo - 1] - targetIdx) <= Math.abs(indices[lo] - targetIdx) ? indices[lo - 1] : indices[lo];
+  }
+  goToPick(best);
+});
+
 document.addEventListener('keydown', e => {
   if (document.querySelector('#view-pick-detail.hidden')) return;
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
-  if (e.key === 'ArrowLeft') { navPick(-1); e.preventDefault(); }
-  if (e.key === 'ArrowRight') { navPick(1); e.preventDefault(); }
+  if (e.ctrlKey && e.key === 'ArrowLeft') { navDispatchEvent(-1); e.preventDefault(); }
+  else if (e.ctrlKey && e.key === 'ArrowRight') { navDispatchEvent(1); e.preventDefault(); }
+  else if (e.shiftKey && e.key === 'ArrowLeft') { navQueueChange(-1); e.preventDefault(); }
+  else if (e.shiftKey && e.key === 'ArrowRight') { navQueueChange(1); e.preventDefault(); }
+  else if (e.key === 'ArrowLeft') { navPick(-1); e.preventDefault(); }
+  else if (e.key === 'ArrowRight') { navPick(1); e.preventDefault(); }
 });
 
 function renderPickDetail() {
@@ -719,7 +911,7 @@ function renderPickDetail() {
   ].map(i => `<div><div class="info-label">${i.label}</div><div class="info-value">${i.value}</div></div>`).join('');
 
   // Score bar chart
-  const sorted = [...p.candidates].sort((a, b) => b.score - a.score);
+  const sorted = [...p.candidates].sort((a, b) => a.programId.localeCompare(b.programId));
   const barLabels = sorted.map(c => c.programId);
   const barData = sorted.map(c => c.score);
   const barColors = sorted.map(c => c.programId === p.winnerId ? 'rgba(34,197,94,0.8)' : (STATE.colorMap[c.programId] || '#999') + '99');
@@ -852,6 +1044,24 @@ function renderPickDetail() {
   }
   mhtml += '</tbody></table>';
   document.getElementById('metrics-table-wrap').innerHTML = mhtml;
+
+  // Update queue change nav button states
+  const qcIdx = STATE.queueChangeIndices;
+  document.getElementById('btn-prev-qc').disabled =
+    qcIdx.length === 0 || qcIdx[0] >= STATE.currentPick;
+  document.getElementById('btn-next-qc').disabled =
+    qcIdx.length === 0 || qcIdx[qcIdx.length - 1] <= STATE.currentPick;
+
+  renderEventTimeline();
+
+  // Update dispatch event nav button states
+  const deIdx = STATE.dispatchEventIndices;
+  document.getElementById('btn-prev-de').disabled =
+    deIdx.length === 0 || deIdx[0] >= STATE.currentPick;
+  document.getElementById('btn-next-de').disabled =
+    deIdx.length === 0 || deIdx[deIdx.length - 1] <= STATE.currentPick;
+
+  renderDispatchTimeline();
 }
 
 // =========================================================================
