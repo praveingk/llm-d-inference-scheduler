@@ -234,6 +234,15 @@ main() {
     log "Running $phase_count phases ..."
     mkdir -p "$RESULTS_DIR"
 
+    # Save scenario and config files for reproducibility
+    mkdir -p "$RESULTS_DIR/config"
+    cp "$SCENARIO" "$RESULTS_DIR/config/"
+    for j in $(seq 0 $((phase_count - 1))); do
+        local cfg
+        cfg="$SCRIPT_DIR/$(yaml_get "phases.$j.epp_config")"
+        [ -f "$cfg" ] && cp "$cfg" "$RESULTS_DIR/config/"
+    done
+
     for i in $(seq 0 $((phase_count - 1))); do
         local phase_name epp_config metrics_subsystem phase_dir
         phase_name="$(yaml_get "phases.$i.name")"
