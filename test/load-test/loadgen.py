@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import json
 import os
+import random
 import statistics
 import time
 from dataclasses import dataclass, field
@@ -167,10 +168,12 @@ async def run_program(
 
     pending: List[asyncio.Task] = []
     stagger = program.initial_request_interval
+    rng = random.Random(program.name)  # deterministic per-program jitter
     for i in range(program.total_requests):
         await sem.acquire()
         if stagger > 0 and 0 < i < program.concurrency:
-            await asyncio.sleep(stagger)
+            jitter = stagger * rng.uniform(0.9, 1.1)
+            await asyncio.sleep(jitter)
         stats.sent += 1
         pending.append(asyncio.create_task(send_one()))
 
