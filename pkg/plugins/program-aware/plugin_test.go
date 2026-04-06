@@ -2,6 +2,9 @@ package programaware
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -411,4 +414,41 @@ func TestPick_AllIdenticalMetrics(t *testing.T) {
 	queue, err := p.Pick(context.Background(), band)
 	assert.NoError(t, err)
 	assert.NotNil(t, queue, "should select a queue even when all metrics are identical")
+}
+
+// --- Pick logging tests ---
+
+func TestPick_LogsWhenAllQueuesEmpty(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "pick.jsonl")
+	logger, err := NewPickLogger(tmpFile)
+	require.NoError(t, err)
+	defer logger.Close()
+
+	p := &ProgramAwarePlugin{pickLogger: logger}
+	p.programMetrics.Store("prog-a", &ProgramMetrics{})
+	p.programMetrics.Store("prog-b", &ProgramMetrics{})
+
+	band := &fcmocks.MockPriorityBandAccessor{
+		IterateQueuesFunc: func(cb func(flowcontrol.FlowQueueAccessor) bool) {
+			cb(&fcmocks.MockFlowQueueAccessor{LenV: 0, FlowKeyV: flowcontrol.FlowKey{ID: "prog-a"}})
+			cb(&fcmocks.MockFlowQueueAccessor{LenV: 0, FlowKeyV: flowcontrol.FlowKey{ID: "prog-b"}})
+		},
+	}
+
+	queue, err := p.Pick(context.Background(), band)
+	assert.NoError(t, err)
+	assert.Nil(t, queue, "no queue should be selected when all are empty")
+
+	data, err := os.ReadFile(tmpFile)
+	require.NoError(t, err)
+	require.NotEmpty(t, data, "pick.jsonl should have an entry even when all queues are empty")
+
+	var entry PickLogEntry
+	err = json.Unmarshal(data[:len(data)-1], &entry) // strip trailing newline
+	require.NoError(t, err)
+	assert.Empty(t, entry.WinnerID, "winnerId should be empty when no queue was selected")
+	assert.Len(t, entry.Candidates, 2, "both programs should appear as candidates")
+	for _, c := range entry.Candidates {
+		assert.Equal(t, 0, c.QueueDepth)
+	}
 }

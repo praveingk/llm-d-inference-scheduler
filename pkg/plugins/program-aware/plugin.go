@@ -96,7 +96,7 @@ var (
 // Example config: {"strategy": "drr"}
 //
 //nolint:revive
-func ProgramAwarePluginFactory(name string, rawCfg json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func ProgramAwarePluginFactory(name string, rawCfg json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
 	cfg := Config{Strategy: "service"}
 	if len(rawCfg) > 0 {
 		if err := json.Unmarshal(rawCfg, &cfg); err != nil {
@@ -115,11 +115,19 @@ func ProgramAwarePluginFactory(name string, rawCfg json.RawMessage, _ plugin.Han
 				ProgramAwarePluginType, name, cfg.PickLogFile, err)
 		}
 	}
-	return &ProgramAwarePlugin{
+	p := &ProgramAwarePlugin{
 		name:       name,
 		strategy:   strategy,
 		pickLogger: logger,
-	}, nil
+	}
+	// Close the pick logger when the EPP shuts down (context cancelled on SIGTERM).
+	if logger != nil && handle != nil {
+		go func() {
+			<-handle.Context().Done()
+			_ = p.Close()
+		}()
+	}
+	return p, nil
 }
 
 // ProgramAwarePlugin implements a FairnessPolicy that selects which program's
@@ -152,6 +160,15 @@ func (p *ProgramAwarePlugin) TypedName() plugin.TypedName {
 		Type: ProgramAwarePluginType,
 		Name: p.name,
 	}
+}
+
+// Close releases resources held by the plugin. If pick logging is enabled,
+// it flushes and closes the log file.
+func (p *ProgramAwarePlugin) Close() error {
+	if p.pickLogger != nil {
+		return p.pickLogger.Close()
+	}
+	return nil
 }
 
 // getStrategy returns the configured strategy, falling back to Service for zero-value
@@ -273,7 +290,7 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 	fairnessIndex.Set(p.computeFairnessIndex())
 
 	// --- JSONL pick logging (includes all queues, even empty ones) ---
-	if p.pickLogger != nil && bestQueue != nil {
+	if p.pickLogger != nil {
 		var candidates []PickLogCandidate
 		// Add scored (non-empty) entries.
 		for _, e := range entries {
@@ -332,10 +349,14 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 			})
 			return true
 		})
+		winnerID := ""
+		if bestQueue != nil {
+			winnerID = bestQueue.FlowKey().ID
+		}
 		_ = p.pickLogger.Log(PickLogEntry{
 			Timestamp:     start,
 			Strategy:      strategy.Name(),
-			WinnerID:      bestQueue.FlowKey().ID,
+			WinnerID:      winnerID,
 			PickLatencyUs: time.Since(start).Microseconds(),
 			Candidates:    candidates,
 		})

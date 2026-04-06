@@ -71,3 +71,19 @@ func (l *PickLogger) Log(entry PickLogEntry) error {
 	}
 	return l.writer.Flush()
 }
+
+// Close flushes any buffered data and closes the underlying file.
+// It is safe to call Close multiple times; subsequent calls are no-ops.
+func (l *PickLogger) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.file == nil {
+		return nil
+	}
+	err := l.writer.Flush()
+	if closeErr := l.file.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	l.file = nil
+	return err
+}
