@@ -113,6 +113,9 @@ check_gateway() {
 
 # --- Kind cluster deployment ---
 deploy_kind() {
+    log "Pulling container images ..."
+    make -C "$REPO_DIR" image-pull
+
     log "Deploying kind cluster (MODEL_NAME=$MODEL) ..."
     EPP_TAG="${EPP_TAG:-program-aware}" \
     EPP_CONFIG="$SCRIPT_DIR/$(yaml_get "phases.0.epp_config")" \

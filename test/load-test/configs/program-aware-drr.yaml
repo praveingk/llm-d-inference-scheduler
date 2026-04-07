@@ -4,7 +4,7 @@ plugins:
 - type: program-aware-fairness
   parameters:
     strategy: drr
-    quantumTokens: 10000
+    quantumTokens: 400
     weightDeficit: 0.85
     weightDrrHeadWait: 0.15
     pickLogFile: /tmp/pick.jsonl
@@ -25,6 +25,3 @@ schedulingProfiles:
   plugins:
   - pluginRef: queue-scorer
   - pluginRef: max-score-picker
-
-saturationDetector:                                                                                                            
-  queueDepthThreshold: 2

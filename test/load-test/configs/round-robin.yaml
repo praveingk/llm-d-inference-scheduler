@@ -19,6 +19,3 @@ schedulingProfiles:
   plugins:
   - pluginRef: queue-scorer
   - pluginRef: max-score-picker
-
-saturationDetector:                                                                                                            
-  queueDepthThreshold: 2
