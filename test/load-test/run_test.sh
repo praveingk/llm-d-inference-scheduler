@@ -131,7 +131,6 @@ tune_simulator() {
         "--block-size=16"
         "--zmq-endpoint=tcp://${EPP_NAME}.${NAMESPACE}.svc.cluster.local:5557"
         "--event-batch-size=16"
-        "--tokenizers-cache-dir=/tokenizer-cache"
         "--data-parallel-size=1"
         "--seed=50"
     )
