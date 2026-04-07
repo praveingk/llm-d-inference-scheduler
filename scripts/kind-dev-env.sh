@@ -234,7 +234,7 @@ for IMAGE in "${VLLM_SIMULATOR_IMAGE}" "${EPP_IMAGE}" "${SIDECAR_IMAGE}" "${UDS_
         "${CONTAINER_RUNTIME}" pull "${PLATFORM_ARGS[@]}" "${IMAGE}"
     fi
     echo "Loading ${IMAGE} into kind cluster..."
-    "${CONTAINER_RUNTIME}" save "${PLATFORM_ARGS[@]}" "${IMAGE}" | kind --name "${CLUSTER_NAME}" load image-archive /dev/stdin
+    "${CONTAINER_RUNTIME}" save "${IMAGE}" | kind --name "${CLUSTER_NAME}" load image-archive /dev/stdin
 done
 
 # ------------------------------------------------------------------------------
