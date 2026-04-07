@@ -113,27 +113,12 @@ check_gateway() {
 
 # --- Kind cluster deployment ---
 deploy_kind() {
-    log "Setting up Go modules ..."
-    cd "$REPO_DIR"
-    export GO111MODULE=on
-    export GOPRIVATE=github.com/llm-d/*
-    go mod download
-    go get sigs.k8s.io/gateway-api-inference-extension@08fc9b098204edf50dca24b0b5a98f3a0c600e41
-    go mod tidy
-
-    log "Building EPP image ..."
-    EPP_TAG="${EPP_TAG:-program-aware}" make -C "$REPO_DIR" image-build-epp
-
-    log "Building UDS tokenizer image ..."
-    make -C "$REPO_DIR" image-build-uds-tokenizer
-
     log "Deploying kind cluster (MODEL_NAME=$MODEL) ..."
     EPP_TAG="${EPP_TAG:-program-aware}" \
     EPP_CONFIG="$SCRIPT_DIR/$(yaml_get "phases.0.epp_config")" \
     MODEL_NAME="$MODEL" \
     make -C "$REPO_DIR" env-dev-kind
 
-    cd "$SCRIPT_DIR"
     log "Kind cluster deployed."
 }
 
