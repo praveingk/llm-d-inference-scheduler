@@ -94,6 +94,10 @@ type Config struct {
 	// Pick() (false, default) or is deferred to OnPreRequest() so the
 	// cursor only moves after a real dispatch. Default: false.
 	DeferRRCursor *bool `json:"deferRRCursor,omitempty"`
+
+	// PickLogFile, when set to a non-empty path, enables JSONL logging of
+	// every Pick() decision to the specified file. Disabled by default.
+	PickLogFile string `json:"pickLogFile,omitempty"`
 }
 
 // Compile-time interface assertions.
@@ -108,7 +112,7 @@ var (
 // Example config: {"strategy": "drr"}
 //
 //nolint:revive
-func ProgramAwarePluginFactory(name string, rawCfg json.RawMessage, _ plugin.Handle) (plugin.Plugin, error) {
+func ProgramAwarePluginFactory(name string, rawCfg json.RawMessage, handle plugin.Handle) (plugin.Plugin, error) {
 	cfg := Config{Strategy: "las"}
 	if len(rawCfg) > 0 {
 		if err := json.Unmarshal(rawCfg, &cfg); err != nil {
@@ -119,10 +123,26 @@ func ProgramAwarePluginFactory(name string, rawCfg json.RawMessage, _ plugin.Han
 	if err != nil {
 		return nil, fmt.Errorf("%s plugin %q: %w", ProgramAwarePluginType, name, err)
 	}
-	return &ProgramAwarePlugin{
-		name:     name,
-		strategy: strategy,
-	}, nil
+	var logger *PickLogger
+	if cfg.PickLogFile != "" {
+		logger, err = NewPickLogger(cfg.PickLogFile)
+		if err != nil {
+			return nil, fmt.Errorf("%s plugin %q: failed to open pick log file %q: %w",
+				ProgramAwarePluginType, name, cfg.PickLogFile, err)
+		}
+	}
+	p := &ProgramAwarePlugin{
+		name:       name,
+		strategy:   strategy,
+		pickLogger: logger,
+	}
+	if logger != nil && handle != nil {
+		go func() {
+			<-handle.Context().Done()
+			_ = p.Close()
+		}()
+	}
+	return p, nil
 }
 
 // ProgramAwarePlugin implements a FairnessPolicy that selects which program's
@@ -144,6 +164,9 @@ type ProgramAwarePlugin struct {
 	// used to compute flow-control queue wait time in PreRequest.
 	// Key: request ID (string), Value: time.Time.
 	requestTimestamps sync.Map
+
+	// pickLogger writes JSONL pick decisions. nil when logging is disabled.
+	pickLogger *PickLogger
 }
 
 // TypedName returns the plugin type and instance name.
@@ -152,6 +175,15 @@ func (p *ProgramAwarePlugin) TypedName() plugin.TypedName {
 		Type: ProgramAwarePluginType,
 		Name: p.name,
 	}
+}
+
+// Close releases resources held by the plugin. If pick logging is enabled,
+// it flushes and closes the log file.
+func (p *ProgramAwarePlugin) Close() error {
+	if p.pickLogger != nil {
+		return p.pickLogger.Close()
+	}
+	return nil
 }
 
 // getStrategy returns the configured strategy, falling back to LAS for zero-value
@@ -222,6 +254,67 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 	}
 
 	fairnessIndex.Set(p.computeFairnessIndex())
+
+	// --- JSONL pick logging (includes all known programs) ---
+	if p.pickLogger != nil {
+		var candidates []PickLogCandidate
+		for id, info := range infos {
+			metrics := info.Metrics
+			candidates = append(candidates, PickLogCandidate{
+				ProgramID:  id,
+				QueueDepth: info.Len,
+				Score:      scores[id],
+				Metrics: PickLogMetrics{
+					AttainedService:   metrics.AttainedService(),
+					AverageWaitTime:   metrics.AverageWaitTime(),
+					TotalRequests:     metrics.TotalRequests(),
+					DispatchedCount:   metrics.DispatchedCount(),
+					TotalInputTokens:  metrics.TotalInputTokens(),
+					TotalOutputTokens: metrics.TotalOutputTokens(),
+					DeficitTokens:     metrics.Deficit(),
+					ServiceRate:       metrics.ServiceRate(),
+				},
+			})
+		}
+		scoredSet := make(map[string]struct{}, len(infos))
+		for id := range infos {
+			scoredSet[id] = struct{}{}
+		}
+		p.programMetrics.Range(func(key, value any) bool {
+			programID := key.(string)
+			if _, ok := scoredSet[programID]; ok {
+				return true
+			}
+			metrics := value.(*ProgramMetrics)
+			candidates = append(candidates, PickLogCandidate{
+				ProgramID:  programID,
+				QueueDepth: 0,
+				Score:      0,
+				Metrics: PickLogMetrics{
+					AttainedService:   metrics.AttainedService(),
+					AverageWaitTime:   metrics.AverageWaitTime(),
+					TotalRequests:     metrics.TotalRequests(),
+					DispatchedCount:   metrics.DispatchedCount(),
+					TotalInputTokens:  metrics.TotalInputTokens(),
+					TotalOutputTokens: metrics.TotalOutputTokens(),
+					DeficitTokens:     metrics.Deficit(),
+					ServiceRate:       metrics.ServiceRate(),
+				},
+			})
+			return true
+		})
+		winnerID := ""
+		if bestQueue != nil {
+			winnerID = bestQueue.FlowKey().ID
+		}
+		_ = p.pickLogger.Log(PickLogEntry{
+			Timestamp:     start,
+			Strategy:      strategy.Name(),
+			WinnerID:      winnerID,
+			PickLatencyUs: time.Since(start).Microseconds(),
+			Candidates:    candidates,
+		})
+	}
 
 	return bestQueue, nil
 }
