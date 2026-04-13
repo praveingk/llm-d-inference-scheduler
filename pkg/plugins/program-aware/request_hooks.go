@@ -59,6 +59,9 @@ func (p *ProgramAwarePlugin) PreRequest(ctx context.Context, request *scheduling
 	metrics.IncrementDispatched()
 	dispatchedTotal.WithLabelValues(programID).Inc()
 
+	// Signal the strategy that an actual dispatch occurred.
+	p.getStrategy().OnPreRequest(programID)
+
 	if enqueueTimeRaw, ok := p.requestTimestamps.Load(request.RequestId); ok {
 		enqueueTime := enqueueTimeRaw.(time.Time)
 		waitMs := float64(time.Since(enqueueTime).Milliseconds())

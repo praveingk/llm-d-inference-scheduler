@@ -63,37 +63,52 @@ func TestFactory_InvalidStrategy(t *testing.T) {
 // DRR Strategy tests
 // =============================================================================
 
-func TestDRRStrategy_OnPickStart_AllocatesQuantum(t *testing.T) {
+func TestDRRStrategy_OnPickStart_AllocatesQuantumWhenArmed(t *testing.T) {
 	s := testDRR()
 	m := &ProgramMetrics{}
 
-	s.OnPickStart("prog", 3, m) // non-empty queue
-	assert.Equal(t, defaultDRRQuantumTokens, m.Deficit(), "non-empty queue should receive quantum")
+	// First call: "prog" is unseen, gets initial quantum even without OnPreRequest.
+	s.OnPickStart("prog", 3, m)
+	assert.Equal(t, defaultDRRQuantumTokens, m.Deficit(), "unseen flow should receive initial quantum")
+
+	// Second call without OnPreRequest: now seen, no quantum added.
+	s.OnPickStart("prog", 3, m)
+	assert.Equal(t, defaultDRRQuantumTokens, m.Deficit(), "seen flow should not receive quantum without OnPreRequest")
+
+	// Arm via OnPreRequest, then quantum is added.
+	s.OnPreRequest("prog")
+	s.OnPickStart("prog", 3, m)
+	assert.Equal(t, defaultDRRQuantumTokens*2, m.Deficit(), "armed queue should receive quantum")
 }
 
 func TestDRRStrategy_OnPickStart_QuantumAccumulates(t *testing.T) {
 	s := testDRR()
 	m := &ProgramMetrics{}
 
+	// First call: unseen → gets initial quantum.
+	s.OnPickStart("prog", 1, m)
+	assert.Equal(t, defaultDRRQuantumTokens, m.Deficit(), "initial quantum for unseen flow")
+
+	// 5 more armed rounds.
 	for range 5 {
+		s.OnPreRequest("prog")
 		s.OnPickStart("prog", 1, m)
+		s.OnPicked("prog") // resets addQuantum
 	}
-	assert.Equal(t, defaultDRRQuantumTokens*5, m.Deficit(), "deficit should accumulate across rounds")
+	assert.Equal(t, defaultDRRQuantumTokens*6, m.Deficit(), "deficit should accumulate (1 initial + 5 armed)")
 }
 
-func TestDRRStrategy_OnPickStart_ResetsOnIdle(t *testing.T) {
+func TestDRRStrategy_OnPickStart_NewFlowGetsInitialQuantum(t *testing.T) {
 	s := testDRR()
 	m := &ProgramMetrics{}
 
-	// Accumulate 3 rounds of quantum.
-	for range 3 {
-		s.OnPickStart("prog", 2, m)
-	}
-	assert.Equal(t, defaultDRRQuantumTokens*3, m.Deficit())
+	// A brand new flow gets quantum on first sight, even without OnPreRequest.
+	s.OnPickStart("new-flow", 0, m)
+	assert.Equal(t, defaultDRRQuantumTokens, m.Deficit(), "unseen flow should receive initial quantum")
 
-	// Queue drains.
-	s.OnPickStart("prog", 0, m)
-	assert.Equal(t, int64(0), m.Deficit(), "deficit must reset to 0 when queue drains")
+	// Second call without OnPreRequest: seen, no quantum.
+	s.OnPickStart("new-flow", 0, m)
+	assert.Equal(t, defaultDRRQuantumTokens, m.Deficit(), "seen flow should not receive quantum without dispatch")
 }
 
 func TestDRRStrategy_OnCompleted_DeductsTokens(t *testing.T) {
@@ -741,10 +756,10 @@ func TestRR_Pick_CyclesThroughPrograms(t *testing.T) {
 	assert.Equal(t, "alpha", queue.FlowKey().ID, "Pick #4 should wrap to alpha")
 }
 
-func TestDRR_Pick_QuantumAllocatedDuringPick(t *testing.T) {
-	p := &ProgramAwarePlugin{strategy: testDRR()}
+func TestDRR_Pick_QuantumAllocatedAfterDispatch(t *testing.T) {
+	drr := testDRR()
+	p := &ProgramAwarePlugin{strategy: drr}
 
-	// Two fresh programs with no prior state.
 	_ = p.getOrCreateMetrics("alpha")
 	_ = p.getOrCreateMetrics("beta")
 
@@ -767,14 +782,26 @@ func TestDRR_Pick_QuantumAllocatedDuringPick(t *testing.T) {
 		},
 	}
 
+	// First Pick: both flows are unseen, so they get initial quantum.
 	_, err := p.Pick(context.Background(), band)
 	require.NoError(t, err)
 
-	// Both queues should have received a quantum during Pick().
 	alphaMetrics, _ := p.programMetrics.Load("alpha")
 	betaMetrics, _ := p.programMetrics.Load("beta")
+	assert.Equal(t, defaultDRRQuantumTokens, alphaMetrics.(*ProgramMetrics).Deficit(), "unseen flows get initial quantum")
+	assert.Equal(t, defaultDRRQuantumTokens, betaMetrics.(*ProgramMetrics).Deficit(), "unseen flows get initial quantum")
 
-	// Deficit after Pick() = quantumTokens (added by OnPickStart, not yet deducted)
-	assert.Equal(t, defaultDRRQuantumTokens, alphaMetrics.(*ProgramMetrics).Deficit())
-	assert.Equal(t, defaultDRRQuantumTokens, betaMetrics.(*ProgramMetrics).Deficit())
+	// Second Pick without dispatch — no additional quantum (already seen).
+	_, err = p.Pick(context.Background(), band)
+	require.NoError(t, err)
+	assert.Equal(t, defaultDRRQuantumTokens, alphaMetrics.(*ProgramMetrics).Deficit(), "no extra quantum without dispatch")
+	assert.Equal(t, defaultDRRQuantumTokens, betaMetrics.(*ProgramMetrics).Deficit(), "no extra quantum without dispatch")
+
+	// Simulate a dispatch via OnPreRequest, then Pick again.
+	drr.OnPreRequest("alpha")
+	_, err = p.Pick(context.Background(), band)
+	require.NoError(t, err)
+
+	assert.Equal(t, defaultDRRQuantumTokens*2, alphaMetrics.(*ProgramMetrics).Deficit())
+	assert.Equal(t, defaultDRRQuantumTokens*2, betaMetrics.(*ProgramMetrics).Deficit())
 }

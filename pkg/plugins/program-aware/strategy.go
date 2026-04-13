@@ -43,6 +43,12 @@ type ScoringStrategy interface {
 	// OnPicked is called after Pick() selects a queue, allowing strategies
 	// to update internal state (e.g., round-robin cursor).
 	OnPicked(programID string)
+
+	// OnPreRequest is called from the PreRequest hook, signalling that a
+	// dispatch actually happened. Strategies that gate per-cycle work on
+	// actual dispatches (e.g., DRR quantum allocation) use this to arm
+	// that work for the next Pick() cycle.
+	OnPreRequest(programID string)
 }
 
 // newStrategy constructs a ScoringStrategy from the plugin config.
@@ -122,34 +128,48 @@ const (
 //   - "bytes"   = prompt + completion tokens (actual cost known at response completion)
 //   - "quantum" = quantumTokens added per Pick() cycle per non-empty queue
 //   - Actual token cost is deducted in OnCompleted() (ResponseComplete hook)
-//   - Idle queues have their deficit reset to 0: standard DRR behavior prevents programs
-//     from accumulating unbounded credit while inactive
+//
+// Quantum is only allocated when a prior dispatch actually occurred (signalled by
+// OnPreRequest setting addQuantum=true). This prevents quantum from accumulating
+// on Pick() cycles that did not result in a dispatch.
 //
 // headWaitMs is used as a secondary signal to prevent starvation of
 // new or returning programs that start with deficit=0.
 //
 // Weights and quantum are configurable via the plugin config; defaults are 0.7/0.3/1000.
 type DRRStrategy struct {
+	mu             sync.Mutex
 	weightDeficit  float64
 	weightHeadWait float64
 	quantumTokens  int64
+	addQuantum     bool              // armed by OnPreRequest, consumed by OnPickStart
+	seen           map[string]struct{} // flows that have already received their initial quantum
 }
 
 // Name returns "drr".
 func (s *DRRStrategy) Name() string { return "drr" }
 
-// OnPickStart allocates a token quantum for active queues and resets deficit for idle queues.
-func (s *DRRStrategy) OnPickStart(_ string, queueLen int, metrics *ProgramMetrics) {
+// OnPickStart allocates a token quantum for all queues when addQuantum is true
+// (a dispatch occurred). Additionally, flows that have never been seen before
+// receive an initial quantum regardless of addQuantum, so new programs start
+// with a non-zero deficit and can compete immediately.
+func (s *DRRStrategy) OnPickStart(programID string, _ int, metrics *ProgramMetrics) {
 	if metrics == nil {
 		return
 	}
-	if queueLen == 0 {
-		// Standard DRR: reset deficit when the queue drains.
-		// Prevents programs from stockpiling credit during idle periods and
-		// bursting at the expense of other programs when they resume.
-		metrics.ResetDeficit()
-	} else {
-		// Allocate this round's token quantum.
+	s.mu.Lock()
+	shouldAdd := s.addQuantum
+	if !shouldAdd {
+		if s.seen == nil {
+			s.seen = make(map[string]struct{})
+		}
+		if _, ok := s.seen[programID]; !ok {
+			shouldAdd = true
+			s.seen[programID] = struct{}{}
+		}
+	}
+	s.mu.Unlock()
+	if shouldAdd {
 		metrics.AddDeficit(s.quantumTokens)
 	}
 }
@@ -185,8 +205,20 @@ func (s *DRRStrategy) Score(normalized []float64) float64 {
 		s.weightHeadWait*normalized[drrDimHeadWait]
 }
 
-// OnPicked is a no-op for DRR (cursor not needed).
-func (s *DRRStrategy) OnPicked(_ string) {}
+// OnPicked resets addQuantum so that quantum is not allocated on the next
+// Pick() cycle unless another dispatch occurs (signalled by OnPreRequest).
+func (s *DRRStrategy) OnPicked(_ string) {
+	s.mu.Lock()
+	s.addQuantum = false
+	s.mu.Unlock()
+}
+
+// OnPreRequest arms quantum allocation for the next Pick() cycle.
+func (s *DRRStrategy) OnPreRequest(_ string) {
+	s.mu.Lock()
+	s.addQuantum = true
+	s.mu.Unlock()
+}
 
 // OnCompleted deducts actual token usage from the deficit counter.
 func (s *DRRStrategy) OnCompleted(metrics *ProgramMetrics, promptTokens, completionTokens int64) {
@@ -290,6 +322,9 @@ func (s *ServiceStrategy) Score(normalized []float64) float64 {
 
 // OnPicked is a no-op for Service (cursor not needed).
 func (s *ServiceStrategy) OnPicked(_ string) {}
+
+// OnPreRequest is a no-op for Service.
+func (s *ServiceStrategy) OnPreRequest(_ string) {}
 
 // OnCompleted accumulates the weighted token cost into the program's attained service.
 func (s *ServiceStrategy) OnCompleted(metrics *ProgramMetrics, promptTokens, completionTokens int64) {
@@ -402,6 +437,9 @@ func (s *RRStrategy) OnPicked(programID string) {
 	s.cycleKeys = s.cycleKeys[:0]
 	s.cycleActive = false
 }
+
+// OnPreRequest is a no-op for round-robin.
+func (s *RRStrategy) OnPreRequest(_ string) {}
 
 // OnCompleted is a no-op for round-robin (no token tracking needed).
 func (s *RRStrategy) OnCompleted(_ *ProgramMetrics, _, _ int64) {}
