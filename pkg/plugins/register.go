@@ -41,6 +41,6 @@ func RegisterAllPlugins() {
 	// ep decider plugins
 	plugin.Register(profile.AlwaysDisaggMulimodalPluginType, profile.AlwaysDisaggMulimodalDeciderPluginFactory)
 	plugin.Register(multi.ContextLengthAwareType, multi.ContextLengthAwareFactory)
-  // program-aware fairness plugin
+	// program-aware fairness plugin
 	plugin.Register(programaware.ProgramAwarePluginType, programaware.ProgramAwarePluginFactory)
 }
