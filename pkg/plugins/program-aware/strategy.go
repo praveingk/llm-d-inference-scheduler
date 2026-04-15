@@ -47,6 +47,7 @@ func newStrategy(cfg Config) (ScoringStrategy, error) {
 			weightHeadWait:         floatOr(cfg.WeightDRRHeadWait, defaultDRRWeightHeadWait),
 			quantumTokens:          int64Or(cfg.QuantumTokens, defaultDRRQuantumTokens),
 			deficitHalfLifeSeconds: floatOr(cfg.DeficitHalfLifeSeconds, defaultDRRDeficitHalfLifeSeconds),
+			preDeductInput:         boolOr(cfg.PreDeductInput, false),
 		}, nil
 	case "", "las":
 		return &LASStrategy{
@@ -54,6 +55,7 @@ func newStrategy(cfg Config) (ScoringStrategy, error) {
 			weightHeadWait:  floatOr(cfg.WeightServiceHeadWait, defaultServiceWeightHeadWait),
 			decayFactor:     floatOr(cfg.ServiceDecayFactor, defaultServiceDecayFactor),
 			halfLifeSeconds: floatOr(cfg.ServiceHalfLifeSeconds, 0),
+			preDeductInput:  boolOr(cfg.PreDeductInput, false),
 		}, nil
 	case "rr":
 		return &RRStrategy{
@@ -97,6 +99,16 @@ func rangeNormalize(v, min, max float64) float64 {
 	return (v - min) / (max - min)
 }
 
+// estimateInputTokens returns an estimated input token count for the given request.
+// Uses RequestSizeBytes / 4 (same heuristic as upstream SimpleTokenEstimator).
+// Returns 0 when the request is nil or has no body size data.
+func estimateInputTokens(request *scheduling.LLMRequest) int64 {
+	if request == nil || request.RequestSizeBytes <= 0 {
+		return 0
+	}
+	return int64(request.RequestSizeBytes / 4)
+}
+
 // =============================================================================
 // DRR Strategy
 // =============================================================================
@@ -132,7 +144,9 @@ type DRRStrategy struct {
 	weightHeadWait         float64
 	quantumTokens          int64
 	deficitHalfLifeSeconds float64  // 0 = no decay
+	preDeductInput         bool     // deduct estimated input tokens at OnPreRequest
 	addQuantum             sync.Map // key: int (band priority) → bool
+	inputEstimates         sync.Map // key: requestID (string) → int64 (estimated weighted input tokens)
 }
 
 // Name returns "drr".
@@ -237,18 +251,39 @@ func (s *DRRStrategy) Pick(bandPriority int, queues map[string]QueueInfo) (flowc
 }
 
 // OnPreRequest resets the quantum flag for the dispatched band.
-func (s *DRRStrategy) OnPreRequest(_ *ProgramMetrics, request *scheduling.LLMRequest) {
+// When preDeductInput is enabled, estimated input tokens are deducted from the
+// deficit counter immediately so in-flight request cost is visible to Pick().
+func (s *DRRStrategy) OnPreRequest(metrics *ProgramMetrics, request *scheduling.LLMRequest) {
 	s.addQuantum.Store(request.Objectives.Priority, true)
+
+	if s.preDeductInput && metrics != nil && request != nil {
+		estimated := estimateInputTokens(request)
+		weightedEstimate := int64(weightInputToken) * estimated
+		metrics.DeductTokens(weightedEstimate)
+		s.inputEstimates.Store(request.RequestId, weightedEstimate)
+	}
 }
 
 // OnCompleted deducts actual token usage from the deficit counter.
+// When preDeductInput is enabled, corrects the input estimate from OnPreRequest
+// and deducts output tokens. The net effect is always the exact actual cost.
 func (s *DRRStrategy) OnCompleted(metrics *ProgramMetrics, _ *scheduling.LLMRequest, response *requestcontrol.Response) {
 	if metrics == nil || response == nil {
 		return
 	}
 	promptTokens := int64(response.Usage.PromptTokens)
 	completionTokens := int64(response.Usage.CompletionTokens)
-	metrics.DeductTokens(weightInputToken*promptTokens + weightOutputToken*completionTokens)
+
+	if s.preDeductInput {
+		actualWeightedInput := int64(weightInputToken) * promptTokens
+		var alreadyDeducted int64
+		if v, ok := s.inputEstimates.LoadAndDelete(response.RequestId); ok {
+			alreadyDeducted = v.(int64)
+		}
+		metrics.DeductTokens((actualWeightedInput - alreadyDeducted) + int64(weightOutputToken)*completionTokens)
+	} else {
+		metrics.DeductTokens(int64(weightInputToken)*promptTokens + int64(weightOutputToken)*completionTokens)
+	}
 }
 
 // =============================================================================
@@ -280,7 +315,9 @@ type LASStrategy struct {
 	weightService   float64
 	weightHeadWait  float64
 	decayFactor     float64
-	halfLifeSeconds float64 // if > 0, use time-based decay instead of per-cycle decayFactor
+	halfLifeSeconds float64  // if > 0, use time-based decay instead of per-cycle decayFactor
+	preDeductInput  bool     // deduct estimated input tokens at OnPreRequest
+	inputEstimates  sync.Map // key: requestID (string) → float64 (estimated weighted input cost)
 }
 
 // Name returns "service".
@@ -371,18 +408,38 @@ func (s *LASStrategy) Pick(_ int, queues map[string]QueueInfo) (flowcontrol.Flow
 	return best, scores
 }
 
-// OnPreRequest is a no-op for LAS.
-func (s *LASStrategy) OnPreRequest(_ *ProgramMetrics, _ *scheduling.LLMRequest) {}
+// OnPreRequest accumulates estimated input token cost into attained service
+// when preDeductInput is enabled, so in-flight request cost is visible to Pick().
+func (s *LASStrategy) OnPreRequest(metrics *ProgramMetrics, request *scheduling.LLMRequest) {
+	if s.preDeductInput && metrics != nil && request != nil {
+		estimated := estimateInputTokens(request)
+		cost := float64(int64(weightInputToken) * estimated)
+		metrics.AddService(cost)
+		s.inputEstimates.Store(request.RequestId, cost)
+	}
+}
 
 // OnCompleted accumulates the weighted token cost into the program's attained service.
+// When preDeductInput is enabled, corrects the input estimate from OnPreRequest
+// and adds output tokens. The net effect is always the exact actual cost.
 func (s *LASStrategy) OnCompleted(metrics *ProgramMetrics, _ *scheduling.LLMRequest, response *requestcontrol.Response) {
 	if metrics == nil || response == nil {
 		return
 	}
 	promptTokens := int64(response.Usage.PromptTokens)
 	completionTokens := int64(response.Usage.CompletionTokens)
-	cost := float64(weightInputToken*promptTokens + weightOutputToken*completionTokens)
-	metrics.AddService(cost)
+
+	if s.preDeductInput {
+		actualWeightedInput := float64(int64(weightInputToken) * promptTokens)
+		var alreadyAdded float64
+		if v, ok := s.inputEstimates.LoadAndDelete(response.RequestId); ok {
+			alreadyAdded = v.(float64)
+		}
+		metrics.AddService((actualWeightedInput - alreadyAdded) + float64(int64(weightOutputToken)*completionTokens))
+	} else {
+		cost := float64(weightInputToken*promptTokens + weightOutputToken*completionTokens)
+		metrics.AddService(cost)
+	}
 }
 
 // =============================================================================

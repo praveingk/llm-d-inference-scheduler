@@ -66,6 +66,14 @@ type Config struct {
 	// Default: 60 (deficit halves every 60s). Set to 0 to disable decay.
 	DeficitHalfLifeSeconds *float64 `json:"deficitHalfLifeSeconds,omitempty"`
 
+	// --- Pre-deduction (applies to "drr" and "las") ---
+
+	// PreDeductInput enables two-phase token accounting: estimated input tokens
+	// are deducted at dispatch (OnPreRequest) using RequestSizeBytes/4, and
+	// corrected at completion using actual PromptTokens.
+	// Applies to "drr" and "las" strategies. Default: false.
+	PreDeductInput *bool `json:"preDeductInput,omitempty"`
+
 	// --- Service weights (only used when strategy == "las") ---
 
 	// WeightService is the weight for the inverted attained service signal.

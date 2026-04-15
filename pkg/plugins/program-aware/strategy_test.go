@@ -860,3 +860,362 @@ func TestDRR_Pick_QuantumAllocatedDuringPick(t *testing.T) {
 	assert.Equal(t, defaultDRRQuantumTokens, alphaMetrics.(*ProgramMetrics).Deficit())
 	assert.Equal(t, defaultDRRQuantumTokens, betaMetrics.(*ProgramMetrics).Deficit())
 }
+
+// =============================================================================
+// Pre-deduct input tokens tests
+// =============================================================================
+
+func testDRRPreDeduct() *DRRStrategy {
+	return &DRRStrategy{
+		weightDeficit:  defaultDRRWeightDeficit,
+		weightHeadWait: defaultDRRWeightHeadWait,
+		quantumTokens:  defaultDRRQuantumTokens,
+		preDeductInput: true,
+	}
+}
+
+func testServicePreDeduct() *LASStrategy {
+	return &LASStrategy{
+		weightService:  defaultServiceWeightService,
+		weightHeadWait: defaultServiceWeightHeadWait,
+		decayFactor:    defaultServiceDecayFactor,
+		preDeductInput: true,
+	}
+}
+
+func TestEstimateInputTokens(t *testing.T) {
+	tests := []struct {
+		name     string
+		request  *scheduling.LLMRequest
+		expected int64
+	}{
+		{
+			name:     "nil request",
+			request:  nil,
+			expected: 0,
+		},
+		{
+			name:     "zero request size",
+			request:  &scheduling.LLMRequest{RequestSizeBytes: 0},
+			expected: 0,
+		},
+		{
+			name:     "normal request size",
+			request:  &scheduling.LLMRequest{RequestSizeBytes: 400},
+			expected: 100,
+		},
+		{
+			name:     "small request rounds down",
+			request:  &scheduling.LLMRequest{RequestSizeBytes: 3},
+			expected: 0,
+		},
+		{
+			name:     "exact division",
+			request:  &scheduling.LLMRequest{RequestSizeBytes: 1000},
+			expected: 250,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, estimateInputTokens(tt.request))
+		})
+	}
+}
+
+// --- DRR pre-deduction tests ---
+
+func TestDRRStrategy_PreDeductInput_OnPreRequest(t *testing.T) {
+	s := testDRRPreDeduct()
+	m := &ProgramMetrics{}
+	m.AddDeficit(defaultDRRQuantumTokens) // start with 1000
+
+	req := &scheduling.LLMRequest{
+		RequestId:        "req-1",
+		RequestSizeBytes: 800, // estimate: 200 tokens → weighted: 200*1 = 200
+	}
+	s.OnPreRequest(m, req)
+
+	assert.Equal(t, int64(800), m.Deficit(), "deficit should be reduced by estimated input cost (1000 - 200)")
+}
+
+func TestDRRStrategy_PreDeductInput_OnPreRequest_ZeroBytes(t *testing.T) {
+	s := testDRRPreDeduct()
+	m := &ProgramMetrics{}
+	m.AddDeficit(defaultDRRQuantumTokens)
+
+	req := &scheduling.LLMRequest{
+		RequestId:        "req-1",
+		RequestSizeBytes: 0, // estimate: 0
+	}
+	s.OnPreRequest(m, req)
+
+	// Still stores 0 estimate for later correction.
+	assert.Equal(t, defaultDRRQuantumTokens, m.Deficit(), "deficit unchanged when estimate is 0")
+}
+
+func TestDRRStrategy_PreDeductInput_OnCompleted_PerfectEstimate(t *testing.T) {
+	s := testDRRPreDeduct()
+	m := &ProgramMetrics{}
+	m.AddDeficit(2000)
+
+	req := &scheduling.LLMRequest{RequestId: "req-1", RequestSizeBytes: 400} // estimate: 100 tokens
+	s.OnPreRequest(m, req)
+	// After pre-deduction: 2000 - 100 = 1900
+
+	resp := &requestcontrol.Response{
+		RequestId: "req-1",
+		Usage:     requestcontrol.Usage{PromptTokens: 100, CompletionTokens: 50},
+	}
+	s.OnCompleted(m, nil, resp)
+	// Correction: (100*1 - 100) = 0, output: 50*2 = 100 → deduct 100
+	// Final: 1900 - 100 = 1800
+
+	assert.Equal(t, int64(1800), m.Deficit())
+}
+
+func TestDRRStrategy_PreDeductInput_OnCompleted_OverEstimate(t *testing.T) {
+	s := testDRRPreDeduct()
+	m := &ProgramMetrics{}
+	m.AddDeficit(2000)
+
+	req := &scheduling.LLMRequest{RequestId: "req-1", RequestSizeBytes: 1200} // estimate: 300 tokens
+	s.OnPreRequest(m, req)
+	// After pre-deduction: 2000 - 300 = 1700
+
+	resp := &requestcontrol.Response{
+		RequestId: "req-1",
+		Usage:     requestcontrol.Usage{PromptTokens: 100, CompletionTokens: 50},
+	}
+	s.OnCompleted(m, nil, resp)
+	// Correction: (100*1 - 300) = -200, output: 50*2 = 100 → deduct -100 (adds 100 back)
+	// Final: 1700 + 100 = 1800
+
+	assert.Equal(t, int64(1800), m.Deficit())
+}
+
+func TestDRRStrategy_PreDeductInput_OnCompleted_UnderEstimate(t *testing.T) {
+	s := testDRRPreDeduct()
+	m := &ProgramMetrics{}
+	m.AddDeficit(2000)
+
+	req := &scheduling.LLMRequest{RequestId: "req-1", RequestSizeBytes: 100} // estimate: 25 tokens
+	s.OnPreRequest(m, req)
+	// After pre-deduction: 2000 - 25 = 1975
+
+	resp := &requestcontrol.Response{
+		RequestId: "req-1",
+		Usage:     requestcontrol.Usage{PromptTokens: 100, CompletionTokens: 50},
+	}
+	s.OnCompleted(m, nil, resp)
+	// Correction: (100*1 - 25) = 75, output: 50*2 = 100 → deduct 175
+	// Final: 1975 - 175 = 1800
+
+	assert.Equal(t, int64(1800), m.Deficit())
+}
+
+func TestDRRStrategy_PreDeductInput_OnCompleted_ZeroEstimate(t *testing.T) {
+	s := testDRRPreDeduct()
+	m := &ProgramMetrics{}
+	m.AddDeficit(2000)
+
+	req := &scheduling.LLMRequest{RequestId: "req-1", RequestSizeBytes: 0} // estimate: 0
+	s.OnPreRequest(m, req)
+	// After pre-deduction: 2000 - 0 = 2000
+
+	resp := &requestcontrol.Response{
+		RequestId: "req-1",
+		Usage:     requestcontrol.Usage{PromptTokens: 100, CompletionTokens: 50},
+	}
+	s.OnCompleted(m, nil, resp)
+	// Correction: (100*1 - 0) = 100, output: 50*2 = 100 → deduct 200
+	// Final: 2000 - 200 = 1800
+
+	assert.Equal(t, int64(1800), m.Deficit())
+}
+
+func TestDRRStrategy_PreDeductInput_EndToEnd_MatchesSinglePhase(t *testing.T) {
+	// Verify that two-phase deduction produces the same net deficit as single-phase.
+	promptTokens := 700
+	completionTokens := 300
+	requestSizeBytes := 2800 // estimate: 700 tokens (matches actual)
+
+	// Single-phase (preDeductInput=false)
+	s1 := testDRR()
+	m1 := &ProgramMetrics{}
+	m1.AddDeficit(5000)
+	resp := &requestcontrol.Response{
+		RequestId: "req-1",
+		Usage:     requestcontrol.Usage{PromptTokens: promptTokens, CompletionTokens: completionTokens},
+	}
+	s1.OnCompleted(m1, nil, resp)
+	singlePhaseDeficit := m1.Deficit()
+
+	// Two-phase (preDeductInput=true)
+	s2 := testDRRPreDeduct()
+	m2 := &ProgramMetrics{}
+	m2.AddDeficit(5000)
+	req := &scheduling.LLMRequest{RequestId: "req-1", RequestSizeBytes: requestSizeBytes}
+	s2.OnPreRequest(m2, req)
+	resp2 := &requestcontrol.Response{
+		RequestId: "req-1",
+		Usage:     requestcontrol.Usage{PromptTokens: promptTokens, CompletionTokens: completionTokens},
+	}
+	s2.OnCompleted(m2, nil, resp2)
+	twoPhaseDeficit := m2.Deficit()
+
+	assert.Equal(t, singlePhaseDeficit, twoPhaseDeficit,
+		"two-phase deduction should produce same net deficit as single-phase")
+}
+
+func TestDRRStrategy_PreDeductInput_False_NoPreDeduction(t *testing.T) {
+	s := testDRR() // preDeductInput defaults to false
+	m := &ProgramMetrics{}
+	m.AddDeficit(defaultDRRQuantumTokens)
+
+	req := &scheduling.LLMRequest{RequestId: "req-1", RequestSizeBytes: 800}
+	s.OnPreRequest(m, req)
+
+	assert.Equal(t, defaultDRRQuantumTokens, m.Deficit(),
+		"with preDeductInput=false, OnPreRequest should not deduct tokens")
+}
+
+// --- LAS pre-deduction tests ---
+
+func TestLASStrategy_PreDeductInput_OnPreRequest(t *testing.T) {
+	s := testServicePreDeduct()
+	m := &ProgramMetrics{}
+
+	req := &scheduling.LLMRequest{
+		RequestId:        "req-1",
+		RequestSizeBytes: 800, // estimate: 200 tokens → cost: 200*1 = 200.0
+	}
+	s.OnPreRequest(m, req)
+
+	assert.InDelta(t, 200.0, m.AttainedService(), 0.01,
+		"attained service should increase by estimated input cost")
+}
+
+func TestLASStrategy_PreDeductInput_OnCompleted_PerfectEstimate(t *testing.T) {
+	s := testServicePreDeduct()
+	m := &ProgramMetrics{}
+
+	req := &scheduling.LLMRequest{RequestId: "req-1", RequestSizeBytes: 400} // estimate: 100 tokens
+	s.OnPreRequest(m, req)
+	// After pre-add: service = 100.0
+
+	resp := &requestcontrol.Response{
+		RequestId: "req-1",
+		Usage:     requestcontrol.Usage{PromptTokens: 100, CompletionTokens: 50},
+	}
+	s.OnCompleted(m, nil, resp)
+	// Correction: (100 - 100) = 0, output: 50*2 = 100 → add 100
+	// Final: 100 + 100 = 200
+
+	assert.InDelta(t, 200.0, m.AttainedService(), 0.01)
+}
+
+func TestLASStrategy_PreDeductInput_OnCompleted_OverEstimate(t *testing.T) {
+	s := testServicePreDeduct()
+	m := &ProgramMetrics{}
+
+	req := &scheduling.LLMRequest{RequestId: "req-1", RequestSizeBytes: 1200} // estimate: 300 tokens
+	s.OnPreRequest(m, req)
+	// After pre-add: service = 300.0
+
+	resp := &requestcontrol.Response{
+		RequestId: "req-1",
+		Usage:     requestcontrol.Usage{PromptTokens: 100, CompletionTokens: 50},
+	}
+	s.OnCompleted(m, nil, resp)
+	// Correction: (100 - 300) = -200, output: 50*2 = 100 → add -100
+	// Final: 300 - 100 = 200
+
+	assert.InDelta(t, 200.0, m.AttainedService(), 0.01)
+}
+
+func TestLASStrategy_PreDeductInput_OnCompleted_UnderEstimate(t *testing.T) {
+	s := testServicePreDeduct()
+	m := &ProgramMetrics{}
+
+	req := &scheduling.LLMRequest{RequestId: "req-1", RequestSizeBytes: 100} // estimate: 25 tokens
+	s.OnPreRequest(m, req)
+	// After pre-add: service = 25.0
+
+	resp := &requestcontrol.Response{
+		RequestId: "req-1",
+		Usage:     requestcontrol.Usage{PromptTokens: 100, CompletionTokens: 50},
+	}
+	s.OnCompleted(m, nil, resp)
+	// Correction: (100 - 25) = 75, output: 50*2 = 100 → add 175
+	// Final: 25 + 175 = 200
+
+	assert.InDelta(t, 200.0, m.AttainedService(), 0.01)
+}
+
+func TestLASStrategy_PreDeductInput_False_NoPreDeduction(t *testing.T) {
+	s := testService() // preDeductInput defaults to false
+	m := &ProgramMetrics{}
+
+	req := &scheduling.LLMRequest{RequestId: "req-1", RequestSizeBytes: 800}
+	s.OnPreRequest(m, req)
+
+	assert.InDelta(t, 0.0, m.AttainedService(), 0.01,
+		"with preDeductInput=false, OnPreRequest should not add service")
+}
+
+func TestLASStrategy_PreDeductInput_EndToEnd_MatchesSinglePhase(t *testing.T) {
+	promptTokens := 700
+	completionTokens := 300
+	requestSizeBytes := 2800
+
+	// Single-phase
+	s1 := testService()
+	m1 := &ProgramMetrics{}
+	resp := &requestcontrol.Response{
+		RequestId: "req-1",
+		Usage:     requestcontrol.Usage{PromptTokens: promptTokens, CompletionTokens: completionTokens},
+	}
+	s1.OnCompleted(m1, nil, resp)
+	singlePhaseService := m1.AttainedService()
+
+	// Two-phase
+	s2 := testServicePreDeduct()
+	m2 := &ProgramMetrics{}
+	req := &scheduling.LLMRequest{RequestId: "req-1", RequestSizeBytes: requestSizeBytes}
+	s2.OnPreRequest(m2, req)
+	resp2 := &requestcontrol.Response{
+		RequestId: "req-1",
+		Usage:     requestcontrol.Usage{PromptTokens: promptTokens, CompletionTokens: completionTokens},
+	}
+	s2.OnCompleted(m2, nil, resp2)
+	twoPhaseService := m2.AttainedService()
+
+	assert.InDelta(t, singlePhaseService, twoPhaseService, 0.01,
+		"two-phase should produce same net attained service as single-phase")
+}
+
+func TestFactory_PreDeductInput(t *testing.T) {
+	// DRR with preDeductInput=true
+	p, err := ProgramAwarePluginFactory("test", []byte(`{"strategy":"drr","preDeductInput":true}`), nil)
+	require.NoError(t, err)
+	drr := p.(*ProgramAwarePlugin).strategy.(*DRRStrategy)
+	assert.True(t, drr.preDeductInput)
+
+	// DRR default (false)
+	p, err = ProgramAwarePluginFactory("test", []byte(`{"strategy":"drr"}`), nil)
+	require.NoError(t, err)
+	drr = p.(*ProgramAwarePlugin).strategy.(*DRRStrategy)
+	assert.False(t, drr.preDeductInput)
+
+	// LAS with preDeductInput=true
+	p, err = ProgramAwarePluginFactory("test", []byte(`{"strategy":"las","preDeductInput":true}`), nil)
+	require.NoError(t, err)
+	las := p.(*ProgramAwarePlugin).strategy.(*LASStrategy)
+	assert.True(t, las.preDeductInput)
+
+	// LAS default (false)
+	p, err = ProgramAwarePluginFactory("test", []byte(`{"strategy":"las"}`), nil)
+	require.NoError(t, err)
+	las = p.(*ProgramAwarePlugin).strategy.(*LASStrategy)
+	assert.False(t, las.preDeductInput)
+}
