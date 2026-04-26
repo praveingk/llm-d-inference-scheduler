@@ -30,20 +30,25 @@ const (
 // Config holds the JSON-decoded configuration for the plugin.
 type Config struct {
 	// Strategy selects the fairness scoring algorithm used by Pick().
-	// Valid values: "las" (default), "drr", "rr".
+	// Valid values: "las" (default), "drr", "rr", "evolved".
 	//
-	//   "las"    — attained service fairness: tracks time-decayed weighted tokens
-	//              consumed per program. Programs with lower attained service are
-	//              promoted. Directly targets fair resource allocation.
+	//   "las"      — attained service fairness: tracks time-decayed weighted tokens
+	//                consumed per program. Programs with lower attained service are
+	//                promoted. Directly targets fair resource allocation.
 	//
-	//   "drr"    — Deficit Round Robin adapted for tokens [Shreedhar & Varghese 1995].
-	//              Each round every active queue earns a token quantum; actual token
-	//              usage is deducted at response completion. Provides provably
-	//              proportional fairness independent of request rate or size.
+	//   "drr"      — Deficit Round Robin adapted for tokens [Shreedhar & Varghese 1995].
+	//                Each round every active queue earns a token quantum; actual token
+	//                usage is deducted at response completion. Provides provably
+	//                proportional fairness independent of request rate or size.
 	//
-	//   "rr"     — Simple round-robin: cycles through program queues in sorted order,
-	//              skipping empty queues. Matches the upstream round-robin fairness
-	//              policy. No token or service tracking.
+	//   "rr"       — Simple round-robin: cycles through program queues in sorted order,
+	//                skipping empty queues. Matches the upstream round-robin fairness
+	//                policy. No token or service tracking.
+	//
+	//   "evolved"  — Two-tier age-based promotion scheduler evolved by AdaEvolve.
+	//                Classifies programs into FINISHING (SRPT priority) or YOUNG
+	//                (LAS fair-share) tiers. Decay is flag-gated to handle the 1ms
+	//                Pick cycle correctly.
 	Strategy string `json:"strategy"`
 
 	// --- DRR weights (only used when strategy == "drr") ---
@@ -94,6 +99,22 @@ type Config struct {
 	// Pick() (false, default) or is deferred to OnPreRequest() so the
 	// cursor only moves after a real dispatch. Default: false.
 	DeferRRCursor *bool `json:"deferRRCursor,omitempty"`
+
+	// --- Evolved strategy options (only used when strategy == "evolved") ---
+
+	// EvolvedDecayFactor is the per-dispatch multiplicative decay for attained service.
+	// Applied once per dispatch cycle (flag-gated), not per Pick() call.
+	// Default: 0.9997. Ignored when EvolvedHalfLifeSeconds is set.
+	EvolvedDecayFactor *float64 `json:"evolvedDecayFactor,omitempty"`
+
+	// EvolvedHalfLifeSeconds enables time-based decay for the evolved strategy.
+	// When set (> 0), overrides EvolvedDecayFactor with wall-clock decay.
+	// Default: 0 (use per-dispatch factor).
+	EvolvedHalfLifeSeconds *float64 `json:"evolvedHalfLifeSeconds,omitempty"`
+
+	// EvolvedTierOffset is the score offset ensuring finishing-tier programs
+	// always outscore young-tier programs. Default: 10000.
+	EvolvedTierOffset *float64 `json:"evolvedTierOffset,omitempty"`
 }
 
 // Compile-time interface assertions.

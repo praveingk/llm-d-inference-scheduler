@@ -59,8 +59,14 @@ func newStrategy(cfg Config) (ScoringStrategy, error) {
 		return &RRStrategy{
 			deferCursor: boolOr(cfg.DeferRRCursor, false),
 		}, nil
+	case "evolved":
+		return &EvolvedStrategy{
+			decayFactor:     floatOr(cfg.EvolvedDecayFactor, defaultEvolvedDecayFactor),
+			halfLifeSeconds: floatOr(cfg.EvolvedHalfLifeSeconds, 0),
+			tierOffset:      floatOr(cfg.EvolvedTierOffset, defaultEvolvedTierOffset),
+		}, nil
 	default:
-		return nil, fmt.Errorf("unknown scoring strategy %q: valid values are \"drr\", \"las\", \"rr\"", cfg.Strategy)
+		return nil, fmt.Errorf("unknown scoring strategy %q: valid values are \"drr\", \"las\", \"rr\", \"evolved\"", cfg.Strategy)
 	}
 }
 
@@ -474,4 +480,298 @@ func (s *RRStrategy) OnPreRequest(_ *ProgramMetrics, request *scheduling.Inferen
 
 // OnCompleted is a no-op for round-robin (no token tracking needed).
 func (s *RRStrategy) OnCompleted(_ *ProgramMetrics, _ *scheduling.InferenceRequest, _ *requestcontrol.Response) {
+}
+
+// =============================================================================
+// Evolved (Two-Tier Age-Based Promotion) Strategy
+// =============================================================================
+
+// Default evolved strategy values.
+const (
+	defaultEvolvedDecayFactor float64 = 0.9997
+	defaultEvolvedTierOffset  float64 = 10000.0
+)
+
+// EvolvedStrategy implements a two-tier age-based promotion scheduler evolved by
+// SkyDiscover/AdaEvolve. Programs are classified into FINISHING (high priority)
+// or YOUNG (fair share) tiers. Finishing programs get SRPT-based scoring to
+// eliminate long-tail durations; young programs get LAS fair-share with
+// anti-starvation mechanisms.
+//
+// Decay is flag-gated: attained service is only decayed on Pick cycles where a
+// real dispatch happened (signaled by OnPreRequest), preventing the 1ms ticker
+// from decaying service 1000x faster than intended.
+type EvolvedStrategy struct {
+	shouldDecay     sync.Map // key: int (band priority) → bool
+	decayFactor     float64
+	halfLifeSeconds float64
+	tierOffset      float64
+}
+
+// Name returns "evolved".
+func (s *EvolvedStrategy) Name() string { return "evolved" }
+
+// Pick classifies programs into finishing/young tiers and scores them.
+func (s *EvolvedStrategy) Pick(bandPriority int, queues map[string]QueueInfo) (flowcontrol.FlowQueueAccessor, map[string]float64) {
+	// --- Decay phase: only when a dispatch happened since last Pick ---
+	doDecay := false
+	if v, ok := s.shouldDecay.Load(bandPriority); ok && v.(bool) {
+		doDecay = true
+	}
+	s.shouldDecay.Store(bandPriority, false)
+
+	now := time.Now()
+
+	for _, qi := range queues {
+		if qi.Metrics == nil {
+			continue
+		}
+		if doDecay {
+			if s.halfLifeSeconds > 0 {
+				qi.Metrics.DecayServiceTimed(s.halfLifeSeconds, now)
+			} else {
+				qi.Metrics.DecayService(s.decayFactor)
+			}
+		}
+	}
+
+	// --- Compute per-program info for non-empty queues ---
+	type progInfo struct {
+		aliveMs    float64
+		progress   float64
+		remaining  float64
+		estWork    float64
+		qLen       int
+		inFlight   int64
+		dispatched int64
+	}
+
+	infos := make(map[string]progInfo)
+	aliveList := make([]float64, 0, len(queues))
+
+	for id, qi := range queues {
+		if qi.Metrics == nil || qi.Len == 0 {
+			continue
+		}
+
+		firstArr := qi.Metrics.FirstArrival()
+		var aliveMs float64
+		if !firstArr.IsZero() {
+			aliveMs = float64(now.Sub(firstArr).Milliseconds())
+			if aliveMs < 0 {
+				aliveMs = 0
+			}
+		}
+
+		dispatched := qi.Metrics.DispatchedCount()
+		inFlight := qi.Metrics.InFlight()
+		remaining := float64(qi.Len) + float64(inFlight)
+		dispF := float64(dispatched)
+
+		var progress float64
+		if dispF+remaining > 0 {
+			progress = dispF / (dispF + remaining)
+		}
+
+		totalIn := float64(qi.Metrics.TotalInputTokens())
+		totalOut := float64(qi.Metrics.TotalOutputTokens())
+		maxDisp := dispF
+		if maxDisp < 1 {
+			maxDisp = 1
+		}
+		avgTok := (totalIn + 2.0*totalOut) / maxDisp
+		estWork := remaining * avgTok
+
+		infos[id] = progInfo{
+			aliveMs:    aliveMs,
+			progress:   progress,
+			remaining:  remaining,
+			estWork:    estWork,
+			qLen:       qi.Len,
+			inFlight:   inFlight,
+			dispatched: dispatched,
+		}
+		aliveList = append(aliveList, aliveMs)
+	}
+
+	if len(infos) == 0 {
+		return nil, nil
+	}
+
+	// --- Compute median alive time ---
+	slices.Sort(aliveList)
+	medianAlive := aliveList[len(aliveList)/2]
+
+	// --- Compute service stats for young tier ---
+	svcList := make([]float64, 0, len(infos))
+	for id := range infos {
+		if qi, ok := queues[id]; ok && qi.Metrics != nil {
+			svcList = append(svcList, qi.Metrics.AttainedService())
+		}
+	}
+	slices.Sort(svcList)
+
+	medianSvc := 1.0
+	p25Svc := 1.0
+	if n := len(svcList); n > 0 {
+		if v := svcList[n/2]; v > 1.0 {
+			medianSvc = v
+		}
+		if n >= 4 {
+			if v := svcList[n/4]; v > 1.0 {
+				p25Svc = v
+			}
+		} else {
+			if v := svcList[0]; v > 1.0 {
+				p25Svc = v
+			}
+		}
+	}
+
+	// --- Score each non-empty queue ---
+	scores := make(map[string]float64, len(infos))
+	var best flowcontrol.FlowQueueAccessor
+	bestScore := math.Inf(-1)
+
+	for id, pi := range infos {
+		qi := queues[id]
+		att := qi.Metrics.AttainedService() + 1.0
+
+		var headWaitMs float64
+		if head := qi.Queue.PeekHead(); head != nil {
+			headWaitMs = float64(now.Sub(head.EnqueueTime()).Milliseconds())
+			if headWaitMs < 0 {
+				headWaitMs = 0
+			}
+		}
+
+		totalReqs := qi.Metrics.TotalRequests()
+		if totalReqs < 1 {
+			totalReqs = 1
+		}
+
+		// Tier classification
+		isFinishing := false
+		if pi.aliveMs > medianAlive && pi.progress > 0.35 && medianAlive > 0 {
+			isFinishing = true
+		}
+		if pi.progress > 0.65 {
+			isFinishing = true
+		}
+		if headWaitMs > 200000 {
+			isFinishing = true
+		}
+		if pi.remaining <= 2 && pi.dispatched > 0 {
+			isFinishing = true
+		}
+
+		var score float64
+
+		if isFinishing {
+			// === FINISHING TIER: SRPT by remaining work ===
+			srpt := 1.0 / (pi.estWork + 1.0) * 100000.0
+
+			var urg float64
+			if pi.progress > 0.8 {
+				urg = 50.0 * (pi.progress - 0.8) * 5.0
+			}
+			if pi.progress > 0.95 {
+				urg += 100.0
+			}
+
+			var drain float64
+			if pi.qLen == 1 {
+				drain = 8.0
+			} else if pi.qLen == 2 {
+				drain = 4.0
+			}
+
+			wt := math.Pow(headWaitMs/100.0+1.0, 0.4) - 1.0
+			dp := math.Log1p(pi.aliveMs / 5000.0)
+
+			var fp float64
+			if pi.inFlight > 1 {
+				fp = 0.5 * float64(pi.inFlight-1)
+			}
+
+			score = s.tierOffset + 3.0*srpt + 4.0*urg + 3.0*drain + 2.0*wt + 2.0*dp - fp
+
+		} else {
+			// === YOUNG TIER: Fair share + wait + SJF ===
+			fair := math.Log1p(medianSvc / att)
+			if att < p25Svc {
+				fair += 1.0
+			}
+
+			wt := math.Pow(headWaitMs/80.0+1.0, 0.5) - 1.0
+			if headWaitMs > 50000 {
+				wt += 3.0
+			}
+			if headWaitMs > 100000 {
+				wt += 6.0
+			}
+			if headWaitMs > 150000 {
+				wt += 10.0
+			}
+
+			totalReqsF := float64(totalReqs)
+			var sb float64
+			if totalReqs <= 3 {
+				sb = 5.0 / math.Log1p(totalReqsF)
+			} else if totalReqs <= 6 {
+				sb = 2.5 / math.Log1p(totalReqsF)
+			}
+
+			var drain float64
+			if pi.qLen == 1 {
+				drain = 3.0
+			} else if pi.qLen == 2 {
+				drain = 1.5
+			}
+
+			srpt := 1.0 / (math.Log1p(pi.estWork/500.0) + 0.5)
+
+			var fp float64
+			if pi.inFlight > 1 {
+				fp = 0.4 * float64(pi.inFlight-1)
+			}
+
+			urg := math.Exp(2.0*pi.progress) - 1.0
+
+			score = 4.0*wt + 3.0*fair + 2.0*srpt + 2.0*drain + sb + 1.5*urg - fp
+		}
+
+		scores[id] = score
+		if score > bestScore {
+			bestScore = score
+			best = qi.Queue
+		}
+	}
+
+	return best, scores
+}
+
+// OnPreRequest tracks in-flight count, first arrival, and signals decay for next Pick.
+func (s *EvolvedStrategy) OnPreRequest(metrics *ProgramMetrics, request *scheduling.InferenceRequest) {
+	if metrics == nil {
+		return
+	}
+	metrics.IncrementInFlight()
+	metrics.SetFirstArrival(time.Now())
+	metrics.SetLastEnqueue(time.Now())
+	if request != nil {
+		s.shouldDecay.Store(request.Objectives.Priority, true)
+	}
+}
+
+// OnCompleted adds weighted token cost to attained service and decrements in-flight.
+func (s *EvolvedStrategy) OnCompleted(metrics *ProgramMetrics, _ *scheduling.InferenceRequest, response *requestcontrol.Response) {
+	if metrics == nil || response == nil {
+		return
+	}
+	promptTokens := int64(response.Usage.PromptTokens)
+	completionTokens := int64(response.Usage.CompletionTokens)
+	cost := float64(weightInputToken*promptTokens + weightOutputToken*completionTokens)
+	metrics.AddService(cost)
+	metrics.DecrementInFlight()
 }

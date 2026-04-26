@@ -413,3 +413,54 @@ func TestPick_AllIdenticalMetrics(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, queue, "should select a queue even when all metrics are identical")
 }
+
+// --- In-flight tracking tests ---
+
+func TestProgramMetrics_InFlight(t *testing.T) {
+	m := &ProgramMetrics{}
+	assert.Equal(t, int64(0), m.InFlight())
+
+	m.IncrementInFlight()
+	m.IncrementInFlight()
+	m.IncrementInFlight()
+	assert.Equal(t, int64(3), m.InFlight())
+
+	m.DecrementInFlight()
+	assert.Equal(t, int64(2), m.InFlight())
+
+	m.DecrementInFlight()
+	m.DecrementInFlight()
+	assert.Equal(t, int64(0), m.InFlight())
+
+	// Should clamp at zero — not go negative.
+	m.DecrementInFlight()
+	assert.Equal(t, int64(0), m.InFlight(), "inFlight should not go below zero")
+}
+
+func TestProgramMetrics_FirstArrival_SetOnce(t *testing.T) {
+	m := &ProgramMetrics{}
+	assert.True(t, m.FirstArrival().IsZero())
+
+	t1 := time.Now()
+	m.SetFirstArrival(t1)
+	assert.Equal(t, t1, m.FirstArrival())
+
+	// Second call should be a no-op.
+	t2 := t1.Add(5 * time.Second)
+	m.SetFirstArrival(t2)
+	assert.Equal(t, t1, m.FirstArrival(), "firstArrival should not change after first set")
+}
+
+func TestProgramMetrics_LastEnqueue(t *testing.T) {
+	m := &ProgramMetrics{}
+	assert.True(t, m.LastEnqueue().IsZero())
+
+	t1 := time.Now()
+	m.SetLastEnqueue(t1)
+	assert.Equal(t, t1, m.LastEnqueue())
+
+	// Should update on subsequent calls (not set-once).
+	t2 := t1.Add(1 * time.Second)
+	m.SetLastEnqueue(t2)
+	assert.Equal(t, t2, m.LastEnqueue(), "lastEnqueue should update on each call")
+}

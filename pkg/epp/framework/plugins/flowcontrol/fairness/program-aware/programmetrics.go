@@ -41,6 +41,16 @@ type ProgramMetrics struct {
 	totalInputTokens  atomic.Int64
 	totalOutputTokens atomic.Int64
 
+	// inFlight tracks how many requests are dispatched but not yet completed.
+	inFlight atomic.Int64
+
+	// firstArrival records when the first request for this program was dispatched.
+	firstArrival     time.Time
+	firstArrivalOnce sync.Once
+
+	// lastEnqueue records the most recent enqueue time for this program.
+	lastEnqueue time.Time
+
 	// deficitTokens is the DRR deficit counter: positive means the program is owed
 	// service; negative means it has been overserved relative to its quantum.
 	// Only used by DRRStrategy.
@@ -209,6 +219,63 @@ func (m *ProgramMetrics) TotalInputTokens() int64 {
 // TotalOutputTokens returns the total number of output tokens across all requests.
 func (m *ProgramMetrics) TotalOutputTokens() int64 {
 	return m.totalOutputTokens.Load()
+}
+
+// --- In-flight tracking ---
+
+// IncrementInFlight atomically increments the in-flight request counter.
+func (m *ProgramMetrics) IncrementInFlight() {
+	m.inFlight.Add(1)
+}
+
+// DecrementInFlight atomically decrements the in-flight request counter, clamping at zero.
+func (m *ProgramMetrics) DecrementInFlight() {
+	for {
+		cur := m.inFlight.Load()
+		if cur <= 0 {
+			return
+		}
+		if m.inFlight.CompareAndSwap(cur, cur-1) {
+			return
+		}
+	}
+}
+
+// InFlight returns the current number of in-flight requests.
+func (m *ProgramMetrics) InFlight() int64 {
+	return m.inFlight.Load()
+}
+
+// SetFirstArrival records the first arrival time for this program. Only the first
+// call takes effect; subsequent calls are no-ops.
+func (m *ProgramMetrics) SetFirstArrival(t time.Time) {
+	m.firstArrivalOnce.Do(func() {
+		m.mu.Lock()
+		m.firstArrival = t
+		m.mu.Unlock()
+	})
+}
+
+// FirstArrival returns the time of the first dispatched request for this program.
+// Returns the zero value if no request has been dispatched yet.
+func (m *ProgramMetrics) FirstArrival() time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.firstArrival
+}
+
+// SetLastEnqueue records the most recent enqueue time for this program.
+func (m *ProgramMetrics) SetLastEnqueue(t time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastEnqueue = t
+}
+
+// LastEnqueue returns the most recent enqueue time for this program.
+func (m *ProgramMetrics) LastEnqueue() time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastEnqueue
 }
 
 // --- DRR deficit counter ---

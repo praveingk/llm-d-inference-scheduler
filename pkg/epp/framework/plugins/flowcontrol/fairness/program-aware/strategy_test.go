@@ -40,6 +40,10 @@ func TestNewStrategy_Valid(t *testing.T) {
 	s, err = newStrategy(Config{Strategy: ""})
 	require.NoError(t, err)
 	assert.Equal(t, "las", s.Name())
+
+	s, err = newStrategy(Config{Strategy: "evolved"})
+	require.NoError(t, err)
+	assert.Equal(t, "evolved", s.Name())
 }
 
 func TestNewStrategy_Invalid(t *testing.T) {
@@ -860,4 +864,375 @@ func TestDRR_Pick_QuantumAllocatedDuringPick(t *testing.T) {
 	// Deficit after Pick() = quantumTokens (added by strategy.Pick(), not yet deducted)
 	assert.Equal(t, defaultDRRQuantumTokens, alphaMetrics.(*ProgramMetrics).Deficit())
 	assert.Equal(t, defaultDRRQuantumTokens, betaMetrics.(*ProgramMetrics).Deficit())
+}
+
+// =============================================================================
+// Evolved (Two-Tier) Strategy tests
+// =============================================================================
+
+func testEvolved() *EvolvedStrategy {
+	return &EvolvedStrategy{
+		decayFactor: defaultEvolvedDecayFactor,
+		tierOffset:  defaultEvolvedTierOffset,
+	}
+}
+
+func TestEvolvedStrategy_Name(t *testing.T) {
+	s := testEvolved()
+	assert.Equal(t, "evolved", s.Name())
+}
+
+func TestNewStrategy_Evolved(t *testing.T) {
+	s, err := newStrategy(Config{Strategy: "evolved"})
+	require.NoError(t, err)
+	assert.Equal(t, "evolved", s.Name())
+}
+
+func TestFactory_EvolvedStrategy(t *testing.T) {
+	p, err := ProgramAwarePluginFactory("test", []byte(`{"strategy":"evolved"}`), nil)
+	require.NoError(t, err)
+	plugin := p.(*ProgramAwarePlugin)
+	assert.Equal(t, "evolved", plugin.strategy.Name())
+}
+
+func TestFactory_EvolvedConfigValues(t *testing.T) {
+	p, err := ProgramAwarePluginFactory("test", []byte(`{"strategy":"evolved","evolvedDecayFactor":0.999,"evolvedTierOffset":5000}`), nil)
+	require.NoError(t, err)
+	plugin := p.(*ProgramAwarePlugin)
+	evolved := plugin.strategy.(*EvolvedStrategy)
+	assert.Equal(t, 0.999, evolved.decayFactor)
+	assert.Equal(t, 5000.0, evolved.tierOffset)
+}
+
+func TestEvolvedStrategy_Pick_EmptyQueues(t *testing.T) {
+	s := testEvolved()
+	selected, scores := s.Pick(0, map[string]QueueInfo{})
+	assert.Nil(t, selected)
+	assert.Nil(t, scores)
+}
+
+func TestEvolvedStrategy_Pick_SingleQueue(t *testing.T) {
+	s := testEvolved()
+	m := &ProgramMetrics{}
+	m.SetFirstArrival(time.Now().Add(-1 * time.Second))
+	m.totalRequests.Store(5)
+	m.dispatchedCount.Store(3)
+	now := time.Now()
+
+	queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 2, m, now)}
+	selected, scores := s.Pick(0, queues)
+	require.NotNil(t, selected)
+	assert.Equal(t, "prog", selected.FlowKey().ID)
+	assert.Contains(t, scores, "prog")
+}
+
+func TestEvolvedStrategy_Pick_AllEmptyQueues(t *testing.T) {
+	s := testEvolved()
+	m := &ProgramMetrics{}
+
+	queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
+	selected, scores := s.Pick(0, queues)
+	assert.Nil(t, selected)
+	assert.Nil(t, scores)
+}
+
+func TestEvolvedStrategy_Pick_DecayOnlyOnDispatch(t *testing.T) {
+	s := testEvolved()
+	m := &ProgramMetrics{}
+	m.AddService(1000.0)
+	m.SetFirstArrival(time.Now().Add(-5 * time.Second))
+	m.totalRequests.Store(10)
+	m.dispatchedCount.Store(5)
+	now := time.Now()
+
+	// Pick without shouldDecay flag — no decay should occur.
+	queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 3, m, now)}
+	s.Pick(0, queues)
+	assert.InDelta(t, 1000.0, m.AttainedService(), 0.01,
+		"Pick without shouldDecay flag should NOT decay service")
+
+	// Simulate a dispatch: OnPreRequest sets shouldDecay.
+	req := &scheduling.InferenceRequest{Objectives: scheduling.RequestObjectives{Priority: 0}}
+	s.OnPreRequest(m, req)
+
+	// Now Pick should decay.
+	s.Pick(0, queues)
+	expected := 1000.0 * defaultEvolvedDecayFactor
+	assert.InDelta(t, expected, m.AttainedService(), 0.01,
+		"Pick after OnPreRequest should decay service")
+}
+
+func TestEvolvedStrategy_Pick_FinishingTierWins(t *testing.T) {
+	s := testEvolved()
+	now := time.Now()
+
+	// "finishing" program: high progress (>0.65 → auto-promote)
+	mFinishing := &ProgramMetrics{}
+	mFinishing.SetFirstArrival(now.Add(-10 * time.Second))
+	mFinishing.totalRequests.Store(10)
+	mFinishing.dispatchedCount.Store(8)
+	mFinishing.totalInputTokens.Store(800)
+	mFinishing.totalOutputTokens.Store(400)
+
+	// "young" program: low progress, fresh
+	mYoung := &ProgramMetrics{}
+	mYoung.SetFirstArrival(now.Add(-1 * time.Second))
+	mYoung.totalRequests.Store(10)
+	mYoung.dispatchedCount.Store(2)
+	mYoung.totalInputTokens.Store(200)
+	mYoung.totalOutputTokens.Store(100)
+
+	queues := map[string]QueueInfo{
+		"finishing": makeQueueInfo("finishing", 2, mFinishing, now),
+		"young":     makeQueueInfo("young", 5, mYoung, now),
+	}
+
+	selected, scores := s.Pick(0, queues)
+	require.NotNil(t, selected)
+	assert.Equal(t, "finishing", selected.FlowKey().ID,
+		"finishing-tier program should be selected over young-tier program")
+	assert.Greater(t, scores["finishing"], scores["young"],
+		"finishing-tier score should exceed young-tier score by tier offset")
+}
+
+func TestEvolvedStrategy_Pick_HighProgressPromotion(t *testing.T) {
+	s := testEvolved()
+	now := time.Now()
+
+	// Program with progress > 0.65 should be promoted to finishing tier.
+	m := &ProgramMetrics{}
+	m.SetFirstArrival(now.Add(-1 * time.Second)) // very fresh (wouldn't qualify by age)
+	m.dispatchedCount.Store(7)                    // dispatched=7
+	m.totalRequests.Store(10)
+	m.totalInputTokens.Store(700)
+	m.totalOutputTokens.Store(350)
+
+	// qLen=1, inFlight=0 → remaining=1, progress = 7/(7+1) = 0.875 > 0.65
+	queues := map[string]QueueInfo{
+		"prog": makeQueueInfo("prog", 1, m, now),
+	}
+
+	selected, scores := s.Pick(0, queues)
+	require.NotNil(t, selected)
+	// Score should include tier offset (10000) since program is in finishing tier.
+	assert.Greater(t, scores["prog"], defaultEvolvedTierOffset,
+		"high-progress program should be promoted to finishing tier (score > tier offset)")
+}
+
+func TestEvolvedStrategy_Pick_EmergencyWaitPromotion(t *testing.T) {
+	s := testEvolved()
+
+	// Program waiting >200 seconds should be promoted to finishing tier.
+	m := &ProgramMetrics{}
+	m.SetFirstArrival(time.Now().Add(-250 * time.Second))
+	m.totalRequests.Store(5)
+	m.dispatchedCount.Store(1)
+	m.totalInputTokens.Store(100)
+	m.totalOutputTokens.Store(50)
+
+	// Enqueue time 250s ago → head_wait > 200s
+	enqueueTime := time.Now().Add(-250 * time.Second)
+	queues := map[string]QueueInfo{
+		"starved": makeQueueInfo("starved", 3, m, enqueueTime),
+	}
+
+	selected, scores := s.Pick(0, queues)
+	require.NotNil(t, selected)
+	assert.Greater(t, scores["starved"], defaultEvolvedTierOffset,
+		"program waiting >200s should be emergency-promoted to finishing tier")
+}
+
+func TestEvolvedStrategy_Pick_LowRemainingPromotion(t *testing.T) {
+	s := testEvolved()
+	now := time.Now()
+
+	// remaining <= 2 and dispatched > 0 → promoted
+	m := &ProgramMetrics{}
+	m.SetFirstArrival(now.Add(-500 * time.Millisecond))
+	m.dispatchedCount.Store(5)
+	m.totalRequests.Store(7)
+	m.totalInputTokens.Store(500)
+	m.totalOutputTokens.Store(250)
+
+	// qLen=1, inFlight=0 → remaining=1
+	queues := map[string]QueueInfo{
+		"almost_done": makeQueueInfo("almost_done", 1, m, now),
+	}
+
+	selected, scores := s.Pick(0, queues)
+	require.NotNil(t, selected)
+	assert.Greater(t, scores["almost_done"], defaultEvolvedTierOffset,
+		"program with remaining<=2 and dispatched>0 should be promoted")
+}
+
+func TestEvolvedStrategy_Pick_YoungTierFairShare(t *testing.T) {
+	s := testEvolved()
+	now := time.Now()
+
+	// Two young programs, same age and queue size. One has lower attained service.
+	mUnderserved := &ProgramMetrics{}
+	mUnderserved.SetFirstArrival(now.Add(-500 * time.Millisecond))
+	mUnderserved.totalRequests.Store(20)
+	mUnderserved.dispatchedCount.Store(2)
+	mUnderserved.AddService(100.0) // low service
+	mUnderserved.totalInputTokens.Store(200)
+	mUnderserved.totalOutputTokens.Store(100)
+
+	mOverserved := &ProgramMetrics{}
+	mOverserved.SetFirstArrival(now.Add(-500 * time.Millisecond))
+	mOverserved.totalRequests.Store(20)
+	mOverserved.dispatchedCount.Store(2)
+	mOverserved.AddService(10000.0) // high service
+	mOverserved.totalInputTokens.Store(200)
+	mOverserved.totalOutputTokens.Store(100)
+
+	queues := map[string]QueueInfo{
+		"underserved": makeQueueInfo("underserved", 10, mUnderserved, now),
+		"overserved":  makeQueueInfo("overserved", 10, mOverserved, now),
+	}
+
+	selected, scores := s.Pick(0, queues)
+	require.NotNil(t, selected)
+	assert.Equal(t, "underserved", selected.FlowKey().ID,
+		"underserved program should be preferred in young tier")
+	assert.Greater(t, scores["underserved"], scores["overserved"],
+		"lower attained service should yield higher score in young tier")
+}
+
+func TestEvolvedStrategy_Pick_SRPTInFinishingTier(t *testing.T) {
+	s := testEvolved()
+	now := time.Now()
+
+	// Both finishing-tier (progress > 0.65), but "light" has less remaining work.
+	mLight := &ProgramMetrics{}
+	mLight.SetFirstArrival(now.Add(-10 * time.Second))
+	mLight.dispatchedCount.Store(9)
+	mLight.totalRequests.Store(10)
+	mLight.totalInputTokens.Store(900)
+	mLight.totalOutputTokens.Store(450)
+	// qLen=1, remaining=1, progress=9/(9+1)=0.9
+
+	mHeavy := &ProgramMetrics{}
+	mHeavy.SetFirstArrival(now.Add(-10 * time.Second))
+	mHeavy.dispatchedCount.Store(7)
+	mHeavy.totalRequests.Store(10)
+	mHeavy.totalInputTokens.Store(700)
+	mHeavy.totalOutputTokens.Store(350)
+	// qLen=5, remaining=5, progress=7/(7+5)=0.583 > 0.65? No.
+	// Need higher dispatched. Let's make dispatched=20, qLen=5.
+	mHeavy.dispatchedCount.Store(20)
+	mHeavy.totalInputTokens.Store(2000)
+	mHeavy.totalOutputTokens.Store(1000)
+	// progress=20/(20+5)=0.8 → finishing. avg_tok=(2000+2000)/20=200. est_work=5*200=1000
+
+	queues := map[string]QueueInfo{
+		"light": makeQueueInfo("light", 1, mLight, now),
+		"heavy": makeQueueInfo("heavy", 5, mHeavy, now),
+	}
+
+	selected, scores := s.Pick(0, queues)
+	require.NotNil(t, selected)
+	assert.Equal(t, "light", selected.FlowKey().ID,
+		"in finishing tier, program with less remaining work (SRPT) should win")
+	assert.Greater(t, scores["light"], scores["heavy"])
+}
+
+func TestEvolvedStrategy_OnPreRequest_IncrementInFlight(t *testing.T) {
+	s := testEvolved()
+	m := &ProgramMetrics{}
+
+	req := &scheduling.InferenceRequest{Objectives: scheduling.RequestObjectives{Priority: 0}}
+	s.OnPreRequest(m, req)
+	assert.Equal(t, int64(1), m.InFlight())
+
+	s.OnPreRequest(m, req)
+	assert.Equal(t, int64(2), m.InFlight())
+}
+
+func TestEvolvedStrategy_OnPreRequest_SetsFirstArrival(t *testing.T) {
+	s := testEvolved()
+	m := &ProgramMetrics{}
+
+	assert.True(t, m.FirstArrival().IsZero(), "firstArrival should be zero before any request")
+
+	req := &scheduling.InferenceRequest{Objectives: scheduling.RequestObjectives{Priority: 0}}
+	s.OnPreRequest(m, req)
+	first := m.FirstArrival()
+	assert.False(t, first.IsZero(), "firstArrival should be set after OnPreRequest")
+
+	// Second call should not change it.
+	time.Sleep(1 * time.Millisecond)
+	s.OnPreRequest(m, req)
+	assert.Equal(t, first, m.FirstArrival(), "firstArrival should not change on second call")
+}
+
+func TestEvolvedStrategy_OnCompleted_DecrementAndService(t *testing.T) {
+	s := testEvolved()
+	m := &ProgramMetrics{}
+	m.IncrementInFlight()
+	m.IncrementInFlight()
+	assert.Equal(t, int64(2), m.InFlight())
+
+	resp := &requestcontrol.Response{Usage: requesthandling.Usage{PromptTokens: 100, CompletionTokens: 50}}
+	s.OnCompleted(m, nil, resp)
+
+	assert.Equal(t, int64(1), m.InFlight(), "inFlight should decrement on completion")
+	assert.InDelta(t, 200.0, m.AttainedService(), 0.01,
+		"attained service should increase by weighted cost (100*1 + 50*2 = 200)")
+}
+
+func TestEvolvedStrategy_OnCompleted_NilSafe(t *testing.T) {
+	s := testEvolved()
+	// Should not panic.
+	s.OnCompleted(nil, nil, nil)
+	s.OnCompleted(&ProgramMetrics{}, nil, nil)
+}
+
+func TestEvolved_Pick_IntegrationViaPlugin(t *testing.T) {
+	p := &ProgramAwarePlugin{strategy: testEvolved()}
+	now := time.Now()
+
+	// Set up two programs: one near completion, one just started.
+	mNearDone := p.getOrCreateMetrics("near_done")
+	mNearDone.SetFirstArrival(now.Add(-5 * time.Second))
+	mNearDone.dispatchedCount.Store(9)
+	mNearDone.totalRequests.Store(10)
+	mNearDone.totalInputTokens.Store(900)
+	mNearDone.totalOutputTokens.Store(450)
+
+	mFresh := p.getOrCreateMetrics("fresh")
+	mFresh.SetFirstArrival(now.Add(-100 * time.Millisecond))
+	mFresh.dispatchedCount.Store(1)
+	mFresh.totalRequests.Store(10)
+	mFresh.totalInputTokens.Store(100)
+	mFresh.totalOutputTokens.Store(50)
+
+	queueNearDone := &fcmocks.MockFlowQueueAccessor{
+		LenV:     1,
+		FlowKeyV: flowcontrol.FlowKey{ID: "near_done"},
+		PeekHeadV: &fcmocks.MockQueueItemAccessor{
+			EnqueueTimeV:     now,
+			OriginalRequestV: &fcmocks.MockFlowControlRequest{IDV: "near_done-req"},
+		},
+	}
+	queueFresh := &fcmocks.MockFlowQueueAccessor{
+		LenV:     8,
+		FlowKeyV: flowcontrol.FlowKey{ID: "fresh"},
+		PeekHeadV: &fcmocks.MockQueueItemAccessor{
+			EnqueueTimeV:     now,
+			OriginalRequestV: &fcmocks.MockFlowControlRequest{IDV: "fresh-req"},
+		},
+	}
+
+	band := &fcmocks.MockPriorityBandAccessor{
+		IterateQueuesFunc: func(cb func(flowcontrol.FlowQueueAccessor) bool) {
+			cb(queueNearDone)
+			cb(queueFresh)
+		},
+	}
+
+	queue, err := p.Pick(context.Background(), band)
+	require.NoError(t, err)
+	assert.Equal(t, "near_done", queue.FlowKey().ID,
+		"near-completion program should be prioritized by evolved strategy")
 }
