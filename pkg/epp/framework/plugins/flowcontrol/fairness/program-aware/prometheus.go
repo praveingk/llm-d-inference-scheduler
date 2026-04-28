@@ -109,6 +109,15 @@ var (
 		},
 		[]string{"program_id"},
 	)
+
+	injectedPriority = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: programAwareSubsystem,
+			Name:      "injected_priority",
+			Help:      metricsutil.HelpMsgWithStability("Priority value injected into the vLLM request body per program (higher = more urgent)", compbasemetrics.ALPHA),
+		},
+		[]string{"program_id"},
+	)
 )
 
 // GetCollectors returns all Prometheus collectors for the program-aware plugin.
@@ -126,5 +135,6 @@ func GetCollectors() []prometheus.Collector {
 		ewmaWaitTimeMs,
 		serviceRateTokensPerSec,
 		queueScore,
+		injectedPriority,
 	}
 }

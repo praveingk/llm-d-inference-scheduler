@@ -29,6 +29,11 @@ type ScoringStrategy interface {
 
 	// OnCompleted is called when a response finishes with actual token usage.
 	OnCompleted(metrics *ProgramMetrics, request *scheduling.InferenceRequest, response *requestcontrol.Response)
+
+	// DispatchPriority returns an integer priority for the given program to be
+	// injected into the vLLM request body. Higher values = more urgent.
+	// Returns (0, false) when the strategy has no meaningful signal.
+	DispatchPriority(metrics *ProgramMetrics) (priority int, ok bool)
 }
 
 // QueueInfo bundles read-only data for each queue passed to Pick.
@@ -251,6 +256,14 @@ func (s *DRRStrategy) OnCompleted(metrics *ProgramMetrics, _ *scheduling.Inferen
 	metrics.DeductTokens(weightInputToken*promptTokens + weightOutputToken*completionTokens)
 }
 
+// DispatchPriority returns the program's deficit as vLLM priority.
+func (s *DRRStrategy) DispatchPriority(metrics *ProgramMetrics) (int, bool) {
+	if metrics == nil {
+		return 0, false
+	}
+	return int(metrics.Deficit()), true
+}
+
 // =============================================================================
 // LAS (Least Attained Service) Strategy
 // =============================================================================
@@ -385,6 +398,20 @@ func (s *LASStrategy) OnCompleted(metrics *ProgramMetrics, _ *scheduling.Inferen
 	metrics.AddService(cost)
 }
 
+const maxLASPriority = 1 << 30
+
+// DispatchPriority returns inverted attained service as vLLM priority.
+func (s *LASStrategy) DispatchPriority(metrics *ProgramMetrics) (int, bool) {
+	if metrics == nil {
+		return 0, false
+	}
+	priority := maxLASPriority - int(metrics.AttainedService())
+	if priority < 0 {
+		priority = 0
+	}
+	return priority, true
+}
+
 // =============================================================================
 // RR (Round-Robin) Strategy
 // =============================================================================
@@ -474,4 +501,9 @@ func (s *RRStrategy) OnPreRequest(_ *ProgramMetrics, request *scheduling.Inferen
 
 // OnCompleted is a no-op for round-robin (no token tracking needed).
 func (s *RRStrategy) OnCompleted(_ *ProgramMetrics, _ *scheduling.InferenceRequest, _ *requestcontrol.Response) {
+}
+
+// DispatchPriority returns no signal for round-robin.
+func (s *RRStrategy) DispatchPriority(_ *ProgramMetrics) (int, bool) {
+	return 0, false
 }

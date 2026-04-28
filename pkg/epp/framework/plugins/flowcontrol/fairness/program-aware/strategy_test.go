@@ -162,6 +162,34 @@ func TestDRRStrategy_OnCompleted_GoesNegativeOnOveruse(t *testing.T) {
 	assert.Equal(t, int64(-1500), m.Deficit(), "deficit should be negative after overuse")
 }
 
+func TestDRRStrategy_DispatchPriority(t *testing.T) {
+	s := testDRR()
+
+	m := &ProgramMetrics{}
+	m.AddDeficit(5000)
+	priority, ok := s.DispatchPriority(m)
+	assert.True(t, ok)
+	assert.Equal(t, 5000, priority)
+}
+
+func TestDRRStrategy_DispatchPriority_Negative(t *testing.T) {
+	s := testDRR()
+
+	m := &ProgramMetrics{}
+	m.DeductTokens(3000)
+	priority, ok := s.DispatchPriority(m)
+	assert.True(t, ok)
+	assert.Equal(t, -3000, priority)
+}
+
+func TestDRRStrategy_DispatchPriority_NilMetrics(t *testing.T) {
+	s := testDRR()
+
+	priority, ok := s.DispatchPriority(nil)
+	assert.False(t, ok)
+	assert.Equal(t, 0, priority)
+}
+
 func TestDRRStrategy_Pick_PreferHighDeficit(t *testing.T) {
 	s := testDRR()
 	now := time.Now()
@@ -479,6 +507,43 @@ func TestLASStrategy_Pick_ColdStartUsesHeadWait(t *testing.T) {
 		"with zero service, longer-waiting queue should outscore newer queue")
 }
 
+func TestLASStrategy_DispatchPriority(t *testing.T) {
+	s := testService()
+
+	m := &ProgramMetrics{}
+	m.AddService(1000.0)
+	priority, ok := s.DispatchPriority(m)
+	assert.True(t, ok)
+	assert.Equal(t, maxLASPriority-1000, priority)
+}
+
+func TestLASStrategy_DispatchPriority_ZeroService(t *testing.T) {
+	s := testService()
+
+	m := &ProgramMetrics{}
+	priority, ok := s.DispatchPriority(m)
+	assert.True(t, ok)
+	assert.Equal(t, maxLASPriority, priority)
+}
+
+func TestLASStrategy_DispatchPriority_ClampedAtZero(t *testing.T) {
+	s := testService()
+
+	m := &ProgramMetrics{}
+	m.AddService(float64(maxLASPriority) + 5000.0)
+	priority, ok := s.DispatchPriority(m)
+	assert.True(t, ok)
+	assert.Equal(t, 0, priority)
+}
+
+func TestLASStrategy_DispatchPriority_NilMetrics(t *testing.T) {
+	s := testService()
+
+	priority, ok := s.DispatchPriority(nil)
+	assert.False(t, ok)
+	assert.Equal(t, 0, priority)
+}
+
 func TestLASStrategy_DecayForgetsOldService(t *testing.T) {
 	s := testService()
 	m := &ProgramMetrics{}
@@ -588,6 +653,14 @@ func TestNewStrategy_RR(t *testing.T) {
 	s, err := newStrategy(Config{Strategy: "rr"})
 	require.NoError(t, err)
 	assert.Equal(t, "rr", s.Name())
+}
+
+func TestRRStrategy_DispatchPriority(t *testing.T) {
+	s := &RRStrategy{}
+
+	priority, ok := s.DispatchPriority(&ProgramMetrics{})
+	assert.False(t, ok)
+	assert.Equal(t, 0, priority)
 }
 
 func TestFactory_RRStrategy(t *testing.T) {
@@ -822,6 +895,156 @@ func TestRR_Pick_CyclesThroughPrograms(t *testing.T) {
 	queue, err := p.Pick(context.Background(), band)
 	require.NoError(t, err)
 	assert.Equal(t, "alpha", queue.FlowKey().ID, "Pick #4 should wrap to alpha")
+}
+
+func TestFactory_InjectPriority(t *testing.T) {
+	p, err := ProgramAwarePluginFactory("test", []byte(`{"strategy":"drr","injectPriority":true}`), nil)
+	require.NoError(t, err)
+	plugin := p.(*ProgramAwarePlugin)
+	assert.True(t, plugin.injectPriority)
+}
+
+func TestFactory_InjectPriorityDefault(t *testing.T) {
+	p, err := ProgramAwarePluginFactory("test", []byte(`{"strategy":"drr"}`), nil)
+	require.NoError(t, err)
+	plugin := p.(*ProgramAwarePlugin)
+	assert.False(t, plugin.injectPriority)
+}
+
+func TestPreRequest_InjectsPriority_DRR(t *testing.T) {
+	p := &ProgramAwarePlugin{
+		strategy:       testDRR(),
+		injectPriority: true,
+	}
+
+	m := p.getOrCreateMetrics("prog-a")
+	m.AddDeficit(5000)
+	p.requestTimestamps.Store("req-1", time.Now().Add(-10*time.Millisecond))
+
+	payload := requesthandling.PayloadMap{"model": "test-model"}
+	request := &scheduling.InferenceRequest{
+		RequestId: "req-1",
+		Headers:   map[string]string{fairnessIDHeader: "prog-a"},
+		Body: &requesthandling.InferenceRequestBody{
+			Payload: payload,
+		},
+	}
+
+	p.PreRequest(context.Background(), request, nil)
+
+	priority, ok := payload["priority"]
+	require.True(t, ok, "priority should be injected into PayloadMap")
+	assert.Equal(t, int(m.Deficit()), priority.(int))
+}
+
+func TestPreRequest_InjectsPriority_LAS(t *testing.T) {
+	p := &ProgramAwarePlugin{
+		strategy:       testService(),
+		injectPriority: true,
+	}
+
+	m := p.getOrCreateMetrics("prog-a")
+	m.AddService(2000.0)
+	p.requestTimestamps.Store("req-1", time.Now().Add(-10*time.Millisecond))
+
+	payload := requesthandling.PayloadMap{"model": "test-model"}
+	request := &scheduling.InferenceRequest{
+		RequestId: "req-1",
+		Headers:   map[string]string{fairnessIDHeader: "prog-a"},
+		Body: &requesthandling.InferenceRequestBody{
+			Payload: payload,
+		},
+	}
+
+	p.PreRequest(context.Background(), request, nil)
+
+	priority, ok := payload["priority"]
+	require.True(t, ok, "priority should be injected into PayloadMap")
+	assert.Equal(t, maxLASPriority-2000, priority.(int))
+}
+
+func TestPreRequest_SkipsWhenDisabled(t *testing.T) {
+	p := &ProgramAwarePlugin{
+		strategy:       testDRR(),
+		injectPriority: false,
+	}
+
+	p.getOrCreateMetrics("prog-a").AddDeficit(5000)
+
+	payload := requesthandling.PayloadMap{"model": "test-model"}
+	request := &scheduling.InferenceRequest{
+		RequestId: "req-1",
+		Headers:   map[string]string{fairnessIDHeader: "prog-a"},
+		Body: &requesthandling.InferenceRequestBody{
+			Payload: payload,
+		},
+	}
+
+	p.PreRequest(context.Background(), request, nil)
+
+	_, ok := payload["priority"]
+	assert.False(t, ok, "priority should not be injected when disabled")
+}
+
+func TestPreRequest_SkipsForRR(t *testing.T) {
+	p := &ProgramAwarePlugin{
+		strategy:       &RRStrategy{},
+		injectPriority: true,
+	}
+
+	payload := requesthandling.PayloadMap{"model": "test-model"}
+	request := &scheduling.InferenceRequest{
+		RequestId: "req-1",
+		Headers:   map[string]string{fairnessIDHeader: "prog-a"},
+		Body: &requesthandling.InferenceRequestBody{
+			Payload: payload,
+		},
+	}
+
+	p.PreRequest(context.Background(), request, nil)
+
+	_, ok := payload["priority"]
+	assert.False(t, ok, "priority should not be injected for RR strategy")
+}
+
+func TestPreRequest_NilBody(t *testing.T) {
+	p := &ProgramAwarePlugin{
+		strategy:       testDRR(),
+		injectPriority: true,
+	}
+
+	p.getOrCreateMetrics("prog-a").AddDeficit(5000)
+
+	request := &scheduling.InferenceRequest{
+		RequestId: "req-1",
+		Headers:   map[string]string{fairnessIDHeader: "prog-a"},
+		Body:      nil,
+	}
+
+	assert.NotPanics(t, func() {
+		p.PreRequest(context.Background(), request, nil)
+	})
+}
+
+func TestPreRequest_NonPayloadMap(t *testing.T) {
+	p := &ProgramAwarePlugin{
+		strategy:       testDRR(),
+		injectPriority: true,
+	}
+
+	p.getOrCreateMetrics("prog-a").AddDeficit(5000)
+
+	request := &scheduling.InferenceRequest{
+		RequestId: "req-1",
+		Headers:   map[string]string{fairnessIDHeader: "prog-a"},
+		Body: &requesthandling.InferenceRequestBody{
+			Payload: requesthandling.RawPayload([]byte(`{"model":"test"}`)),
+		},
+	}
+
+	assert.NotPanics(t, func() {
+		p.PreRequest(context.Background(), request, nil)
+	})
 }
 
 func TestDRR_Pick_QuantumAllocatedDuringPick(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/datalayer"
 	requestcontrol "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requestcontrol"
+	requesthandling "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/requesthandling"
 	scheduling "github.com/llm-d/llm-d-inference-scheduler/pkg/epp/framework/interface/scheduling"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -57,6 +58,17 @@ func (p *ProgramAwarePlugin) PreRequest(ctx context.Context, request *scheduling
 
 	metrics := p.getOrCreateMetrics(programID)
 	p.getStrategy().OnPreRequest(metrics, request)
+
+	if p.injectPriority {
+		if priority, ok := p.getStrategy().DispatchPriority(metrics); ok {
+			if request.Body != nil {
+				if pm, ok := request.Body.Payload.(requesthandling.PayloadMap); ok {
+					pm["priority"] = priority
+					injectedPriority.WithLabelValues(programID).Set(float64(priority))
+				}
+			}
+		}
+	}
 
 	metrics.IncrementDispatched()
 	dispatchedTotal.WithLabelValues(programID).Inc()

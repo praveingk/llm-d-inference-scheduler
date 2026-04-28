@@ -94,6 +94,12 @@ type Config struct {
 	// Pick() (false, default) or is deferred to OnPreRequest() so the
 	// cursor only moves after a real dispatch. Default: false.
 	DeferRRCursor *bool `json:"deferRRCursor,omitempty"`
+
+	// InjectPriority enables injecting a "priority" field into the JSON
+	// request body sent to vLLM, carrying the strategy's fairness signal
+	// (deficit for DRR, inverted attained service for LAS).
+	// Default: false.
+	InjectPriority *bool `json:"injectPriority,omitempty"`
 }
 
 // Compile-time interface assertions.
@@ -120,8 +126,9 @@ func ProgramAwarePluginFactory(name string, rawCfg json.RawMessage, _ plugin.Han
 		return nil, fmt.Errorf("%s plugin %q: %w", ProgramAwarePluginType, name, err)
 	}
 	return &ProgramAwarePlugin{
-		name:     name,
-		strategy: strategy,
+		name:           name,
+		strategy:       strategy,
+		injectPriority: boolOr(cfg.InjectPriority, false),
 	}, nil
 }
 
@@ -133,8 +140,9 @@ func ProgramAwarePluginFactory(name string, rawCfg json.RawMessage, _ plugin.Han
 //
 //nolint:revive
 type ProgramAwarePlugin struct {
-	name     string
-	strategy ScoringStrategy
+	name           string
+	strategy       ScoringStrategy
+	injectPriority bool
 
 	// programMetrics stores aggregated metrics per program.
 	// Key: program ID (string), Value: *ProgramMetrics.
