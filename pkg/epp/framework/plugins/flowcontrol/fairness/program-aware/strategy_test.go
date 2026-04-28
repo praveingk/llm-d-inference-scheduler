@@ -169,17 +169,17 @@ func TestDRRStrategy_DispatchPriority(t *testing.T) {
 	m.AddDeficit(5000)
 	priority, ok := s.DispatchPriority(m)
 	assert.True(t, ok)
-	assert.Equal(t, 5000, priority)
+	assert.Equal(t, -5000, priority, "higher deficit should produce lower (more urgent) vLLM priority")
 }
 
-func TestDRRStrategy_DispatchPriority_Negative(t *testing.T) {
+func TestDRRStrategy_DispatchPriority_Overserved(t *testing.T) {
 	s := testDRR()
 
 	m := &ProgramMetrics{}
-	m.DeductTokens(3000)
+	m.DeductTokens(3000) // deficit = -3000 (overserved)
 	priority, ok := s.DispatchPriority(m)
 	assert.True(t, ok)
-	assert.Equal(t, -3000, priority)
+	assert.Equal(t, 3000, priority, "negative deficit (overserved) should produce positive (less urgent) vLLM priority")
 }
 
 func TestDRRStrategy_DispatchPriority_NilMetrics(t *testing.T) {
@@ -514,7 +514,7 @@ func TestLASStrategy_DispatchPriority(t *testing.T) {
 	m.AddService(1000.0)
 	priority, ok := s.DispatchPriority(m)
 	assert.True(t, ok)
-	assert.Equal(t, maxLASPriority-1000, priority)
+	assert.Equal(t, 1000, priority, "attained service maps directly to vLLM priority (lower service = lower = more urgent)")
 }
 
 func TestLASStrategy_DispatchPriority_ZeroService(t *testing.T) {
@@ -523,17 +523,17 @@ func TestLASStrategy_DispatchPriority_ZeroService(t *testing.T) {
 	m := &ProgramMetrics{}
 	priority, ok := s.DispatchPriority(m)
 	assert.True(t, ok)
-	assert.Equal(t, maxLASPriority, priority)
+	assert.Equal(t, 0, priority, "zero service = most urgent (lowest priority number)")
 }
 
-func TestLASStrategy_DispatchPriority_ClampedAtZero(t *testing.T) {
+func TestLASStrategy_DispatchPriority_HighService(t *testing.T) {
 	s := testService()
 
 	m := &ProgramMetrics{}
-	m.AddService(float64(maxLASPriority) + 5000.0)
+	m.AddService(50000.0)
 	priority, ok := s.DispatchPriority(m)
 	assert.True(t, ok)
-	assert.Equal(t, 0, priority)
+	assert.Equal(t, 50000, priority, "high service = least urgent (highest priority number)")
 }
 
 func TestLASStrategy_DispatchPriority_NilMetrics(t *testing.T) {
@@ -934,7 +934,7 @@ func TestPreRequest_InjectsPriority_DRR(t *testing.T) {
 
 	priority, ok := payload["priority"]
 	require.True(t, ok, "priority should be injected into PayloadMap")
-	assert.Equal(t, int(m.Deficit()), priority.(int))
+	assert.Equal(t, -int(m.Deficit()), priority.(int))
 }
 
 func TestPreRequest_InjectsPriority_LAS(t *testing.T) {
@@ -960,7 +960,7 @@ func TestPreRequest_InjectsPriority_LAS(t *testing.T) {
 
 	priority, ok := payload["priority"]
 	require.True(t, ok, "priority should be injected into PayloadMap")
-	assert.Equal(t, maxLASPriority-2000, priority.(int))
+	assert.Equal(t, 2000, priority.(int))
 }
 
 func TestPreRequest_SkipsWhenDisabled(t *testing.T) {

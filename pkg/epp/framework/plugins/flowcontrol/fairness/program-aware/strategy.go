@@ -31,7 +31,7 @@ type ScoringStrategy interface {
 	OnCompleted(metrics *ProgramMetrics, request *scheduling.InferenceRequest, response *requestcontrol.Response)
 
 	// DispatchPriority returns an integer priority for the given program to be
-	// injected into the vLLM request body. Higher values = more urgent.
+	// injected into the vLLM request body. Lower values = earlier handling.
 	// Returns (0, false) when the strategy has no meaningful signal.
 	DispatchPriority(metrics *ProgramMetrics) (priority int, ok bool)
 }
@@ -256,12 +256,14 @@ func (s *DRRStrategy) OnCompleted(metrics *ProgramMetrics, _ *scheduling.Inferen
 	metrics.DeductTokens(weightInputToken*promptTokens + weightOutputToken*completionTokens)
 }
 
-// DispatchPriority returns the program's deficit as vLLM priority.
+// DispatchPriority returns the negated deficit as vLLM priority.
+// vLLM uses lower values = earlier handling, so higher deficit (more
+// deserving) maps to a more negative (lower) priority number.
 func (s *DRRStrategy) DispatchPriority(metrics *ProgramMetrics) (int, bool) {
 	if metrics == nil {
 		return 0, false
 	}
-	return int(metrics.Deficit()), true
+	return -int(metrics.Deficit()), true
 }
 
 // =============================================================================
@@ -398,18 +400,14 @@ func (s *LASStrategy) OnCompleted(metrics *ProgramMetrics, _ *scheduling.Inferen
 	metrics.AddService(cost)
 }
 
-const maxLASPriority = 1 << 30
-
-// DispatchPriority returns inverted attained service as vLLM priority.
+// DispatchPriority returns attained service as vLLM priority.
+// vLLM uses lower values = earlier handling. Lower attained service
+// means more deserving, which naturally maps to a lower priority number.
 func (s *LASStrategy) DispatchPriority(metrics *ProgramMetrics) (int, bool) {
 	if metrics == nil {
 		return 0, false
 	}
-	priority := maxLASPriority - int(metrics.AttainedService())
-	if priority < 0 {
-		priority = 0
-	}
-	return priority, true
+	return int(metrics.AttainedService()), true
 }
 
 // =============================================================================
