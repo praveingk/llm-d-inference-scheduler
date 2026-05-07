@@ -17,6 +17,9 @@ const (
 
 // ProgramMetrics holds aggregated metrics for a single program (identified by its fairness ID).
 // All methods are goroutine-safe.
+//
+// Scoring fields (attainedService, deficitTokens) are lock-free atomics for zero-contention
+// reads in Pick(). Observability fields (EWMA, service rate) use mu.
 type ProgramMetrics struct {
 	mu                sync.Mutex
 	averageWaitTime   float64 // EWMA in milliseconds
@@ -27,9 +30,9 @@ type ProgramMetrics struct {
 	averageTokens float64 // EWMA of per-request token usage (input+output)
 
 	// Attained service: time-decayed accumulator of weighted tokens consumed.
-	// Increased on each completion, decayed on each Pick() cycle.
-	attainedService float64
-	lastDecayTime   time.Time // last wall-clock time DecayServiceTimed was called
+	// Lock-free via CAS; increased on each completion, decayed by background loop.
+	attainedService atomic.Uint64 // stores float64 via math.Float64bits
+	lastDecayTime   time.Time     // protected by mu (only accessed by decay loop)
 
 	// Service rate: EWMA of weighted tokens per second, updated on each completion.
 	// Used for Jain's fairness index (equalizing rates across programs = fair).
@@ -43,9 +46,9 @@ type ProgramMetrics struct {
 
 	// deficitTokens is the DRR deficit counter: positive means the program is owed
 	// service; negative means it has been overserved relative to its quantum.
-	// Only used by DRRStrategy.
-	deficitTokens    atomic.Int64
-	lastDeficitDecay time.Time // last wall-clock time DecayDeficitTimed was called
+	// Lock-free via CAS; decayed by background loop.
+	deficitTokens    atomic.Uint64 // stores float64 via math.Float64bits
+	lastDeficitDecay time.Time     // protected by mu (only accessed by decay loop)
 }
 
 // IncrementRequests atomically increments the total request counter.
@@ -121,19 +124,35 @@ func (m *ProgramMetrics) AverageTokens() float64 {
 	return m.averageTokens
 }
 
-// AddService accumulates weighted token cost into the attained service counter.
-func (m *ProgramMetrics) AddService(weightedTokens float64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.attainedService += weightedTokens
+// --- Atomic float64 helpers ---
+
+func loadFloat64(addr *atomic.Uint64) float64 {
+	return math.Float64frombits(addr.Load())
 }
 
-// DecayService multiplies the attained service counter by the given factor,
-// causing old service to be gradually forgotten.
-func (m *ProgramMetrics) DecayService(factor float64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.attainedService *= factor
+func casAddFloat64(addr *atomic.Uint64, delta float64) {
+	for {
+		old := addr.Load()
+		newVal := math.Float64bits(math.Float64frombits(old) + delta)
+		if addr.CompareAndSwap(old, newVal) {
+			return
+		}
+	}
+}
+
+func casMulFloat64(addr *atomic.Uint64, factor float64) {
+	for {
+		old := addr.Load()
+		newVal := math.Float64bits(math.Float64frombits(old) * factor)
+		if addr.CompareAndSwap(old, newVal) {
+			return
+		}
+	}
+}
+
+// AddService accumulates weighted token cost into the attained service counter.
+func (m *ProgramMetrics) AddService(weightedTokens float64) {
+	casAddFloat64(&m.attainedService, weightedTokens)
 }
 
 // DecayServiceTimed applies time-based exponential decay using a half-life.
@@ -141,18 +160,21 @@ func (m *ProgramMetrics) DecayService(factor float64) {
 // halves every halfLifeSeconds regardless of how frequently this is called.
 func (m *ProgramMetrics) DecayServiceTimed(halfLifeSeconds float64, now time.Time) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.lastDecayTime.IsZero() {
 		m.lastDecayTime = now
+		m.mu.Unlock()
 		return
 	}
 	elapsed := now.Sub(m.lastDecayTime).Seconds()
 	if elapsed <= 0 {
+		m.mu.Unlock()
 		return
 	}
 	factor := math.Pow(0.5, elapsed/halfLifeSeconds)
-	m.attainedService *= factor
 	m.lastDecayTime = now
+	m.mu.Unlock()
+
+	casMulFloat64(&m.attainedService, factor)
 }
 
 // RecordServiceRate updates the EWMA of service rate (weighted tokens/sec)
@@ -186,9 +208,7 @@ func (m *ProgramMetrics) ServiceRate() float64 {
 
 // AttainedService returns the current time-decayed attained service value.
 func (m *ProgramMetrics) AttainedService() float64 {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.attainedService
+	return loadFloat64(&m.attainedService)
 }
 
 // TotalRequests returns the total number of requests seen for this program.
@@ -214,23 +234,23 @@ func (m *ProgramMetrics) TotalOutputTokens() int64 {
 // --- DRR deficit counter ---
 
 // AddDeficit increases the deficit counter by n tokens (quantum allocation).
-func (m *ProgramMetrics) AddDeficit(n int64) {
-	m.deficitTokens.Add(n)
+func (m *ProgramMetrics) AddDeficit(n float64) {
+	casAddFloat64(&m.deficitTokens, n)
 }
 
 // DeductTokens decreases the deficit counter by n tokens (actual cost deduction).
-func (m *ProgramMetrics) DeductTokens(n int64) {
-	m.deficitTokens.Add(-n)
+func (m *ProgramMetrics) DeductTokens(n float64) {
+	casAddFloat64(&m.deficitTokens, -n)
 }
 
 // ResetDeficit sets the deficit counter to zero (called when the queue drains).
 func (m *ProgramMetrics) ResetDeficit() {
-	m.deficitTokens.Store(0)
+	m.deficitTokens.Store(math.Float64bits(0))
 }
 
 // Deficit returns the current deficit counter value in tokens.
-func (m *ProgramMetrics) Deficit() int64 {
-	return m.deficitTokens.Load()
+func (m *ProgramMetrics) Deficit() float64 {
+	return loadFloat64(&m.deficitTokens)
 }
 
 // DecayDeficitTimed applies time-based exponential decay to the deficit counter
@@ -238,18 +258,19 @@ func (m *ProgramMetrics) Deficit() int64 {
 // deficit halves every halfLifeSeconds regardless of call frequency.
 func (m *ProgramMetrics) DecayDeficitTimed(halfLifeSeconds float64, now time.Time) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.lastDeficitDecay.IsZero() {
 		m.lastDeficitDecay = now
+		m.mu.Unlock()
 		return
 	}
 	elapsed := now.Sub(m.lastDeficitDecay).Seconds()
 	if elapsed <= 0 {
+		m.mu.Unlock()
 		return
 	}
 	factor := math.Pow(0.5, elapsed/halfLifeSeconds)
-	current := m.deficitTokens.Load()
-	decayed := int64(float64(current) * factor)
-	m.deficitTokens.Store(decayed)
 	m.lastDeficitDecay = now
+	m.mu.Unlock()
+
+	casMulFloat64(&m.deficitTokens, factor)
 }

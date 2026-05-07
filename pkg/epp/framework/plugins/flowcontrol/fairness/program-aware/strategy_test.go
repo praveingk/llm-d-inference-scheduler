@@ -107,7 +107,7 @@ func TestDRRStrategy_Pick_AllocatesQuantum(t *testing.T) {
 	queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 3, m, now)}
 	s.Pick(0, queues)
 
-	assert.Equal(t, defaultDRRQuantumTokens, m.Deficit(), "non-empty queue should receive quantum")
+	assert.InDelta(t, float64(defaultDRRQuantumTokens), m.Deficit(), 0.01, "non-empty queue should receive quantum")
 }
 
 func TestDRRStrategy_Pick_QuantumAccumulates(t *testing.T) {
@@ -120,7 +120,7 @@ func TestDRRStrategy_Pick_QuantumAccumulates(t *testing.T) {
 		s.Pick(0, queues)
 		s.OnPreRequest(nil, testRequest()) // reset for next dispatch cycle
 	}
-	assert.Equal(t, defaultDRRQuantumTokens*5, m.Deficit(), "deficit should accumulate across rounds")
+	assert.InDelta(t, float64(defaultDRRQuantumTokens)*5, m.Deficit(), 0.01, "deficit should accumulate across rounds")
 }
 
 func TestDRRStrategy_Pick_IdleNoQuantum(t *testing.T) {
@@ -134,32 +134,32 @@ func TestDRRStrategy_Pick_IdleNoQuantum(t *testing.T) {
 		s.Pick(0, queues)
 		s.OnPreRequest(nil, testRequest())
 	}
-	assert.Equal(t, defaultDRRQuantumTokens*3, m.Deficit())
+	assert.InDelta(t, float64(defaultDRRQuantumTokens)*3, m.Deficit(), 0.01)
 
 	// Queue drains — deficit should NOT increase (no quantum for empty queues).
 	queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
 	s.Pick(0, queues)
-	assert.Equal(t, defaultDRRQuantumTokens*3, m.Deficit(), "idle queues do not receive quantum")
+	assert.InDelta(t, float64(defaultDRRQuantumTokens)*3, m.Deficit(), 0.01, "idle queues do not receive quantum")
 }
 
 func TestDRRStrategy_OnCompleted_DeductsTokens(t *testing.T) {
 	s := testDRR()
 	m := &ProgramMetrics{}
-	m.AddDeficit(defaultDRRQuantumTokens) // one round of quantum
+	m.AddDeficit(float64(defaultDRRQuantumTokens)) // one round of quantum
 
 	resp := &requestcontrol.Response{Usage: requesthandling.Usage{PromptTokens: 700, CompletionTokens: 300}}
 	s.OnCompleted(m, nil, resp) // weighted cost: 700*1 + 300*2 = 1300
-	assert.Equal(t, int64(-300), m.Deficit(), "weighted 1300-token cost against 1000 quantum")
+	assert.InDelta(t, -300.0, m.Deficit(), 0.01, "weighted 1300-token cost against 1000 quantum")
 }
 
 func TestDRRStrategy_OnCompleted_GoesNegativeOnOveruse(t *testing.T) {
 	s := testDRR()
 	m := &ProgramMetrics{}
-	m.AddDeficit(defaultDRRQuantumTokens) // 1000 tokens
+	m.AddDeficit(float64(defaultDRRQuantumTokens)) // 1000 tokens
 
 	resp := &requestcontrol.Response{Usage: requesthandling.Usage{PromptTokens: 1500, CompletionTokens: 500}}
 	s.OnCompleted(m, nil, resp) // weighted cost: 1500*1 + 500*2 = 2500
-	assert.Equal(t, int64(-1500), m.Deficit(), "deficit should be negative after overuse")
+	assert.InDelta(t, -1500.0, m.Deficit(), 0.01, "deficit should be negative after overuse")
 }
 
 func TestDRRStrategy_Pick_PreferHighDeficit(t *testing.T) {
@@ -192,11 +192,11 @@ func TestDRRStrategy_Pick_QuantumOncePerCycle(t *testing.T) {
 	// First Pick allocates quantum.
 	queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 3, m, now)}
 	s.Pick(0, queues)
-	assert.Equal(t, defaultDRRQuantumTokens, m.Deficit(), "first Pick should allocate quantum")
+	assert.InDelta(t, float64(defaultDRRQuantumTokens), m.Deficit(), 0.01, "first Pick should allocate quantum")
 
 	// Second Pick without OnPrerequest — same program already seen, no extra quantum.
 	s.Pick(0, queues)
-	assert.Equal(t, defaultDRRQuantumTokens, m.Deficit(), "second Pick without OnPrerequest should not allocate again")
+	assert.InDelta(t, float64(defaultDRRQuantumTokens), m.Deficit(), 0.01, "second Pick without OnPrerequest should not allocate again")
 }
 
 func TestDRRStrategy_OnPrerequest_ResetsQuantum(t *testing.T) {
@@ -206,12 +206,12 @@ func TestDRRStrategy_OnPrerequest_ResetsQuantum(t *testing.T) {
 
 	queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 3, m, now)}
 	s.Pick(0, queues)
-	assert.Equal(t, defaultDRRQuantumTokens, m.Deficit())
+	assert.InDelta(t, float64(defaultDRRQuantumTokens), m.Deficit(), 0.01)
 
 	// OnPrerequest resets the cycle — next Pick should allocate again.
 	s.OnPreRequest(nil, testRequest())
 	s.Pick(0, queues)
-	assert.Equal(t, defaultDRRQuantumTokens*2, m.Deficit(), "Pick after OnPrerequest should allocate quantum again")
+	assert.InDelta(t, float64(defaultDRRQuantumTokens)*2, m.Deficit(), 0.01, "Pick after OnPrerequest should allocate quantum again")
 }
 
 // =============================================================================
@@ -229,34 +229,34 @@ func testDRRWithDecay(halfLife float64) *DRRStrategy {
 
 func TestDRRStrategy_DecayDeficit_FirstCallNoDecay(t *testing.T) {
 	m := &ProgramMetrics{}
-	m.AddDeficit(10000)
+	m.AddDeficit(10000.0)
 
 	m.DecayDeficitTimed(60.0, time.Now())
-	assert.Equal(t, int64(10000), m.Deficit(),
+	assert.InDelta(t, 10000.0, m.Deficit(), 0.01,
 		"first decay call should not reduce deficit (only sets timestamp)")
 }
 
 func TestDRRStrategy_DecayDeficit_HalvesAtHalfLife(t *testing.T) {
 	m := &ProgramMetrics{}
-	m.AddDeficit(10000)
+	m.AddDeficit(10000.0)
 
 	now := time.Now()
 	m.DecayDeficitTimed(60.0, now)                     // initialize
 	m.DecayDeficitTimed(60.0, now.Add(60*time.Second)) // one half-life
 
-	assert.Equal(t, int64(5000), m.Deficit(),
+	assert.InDelta(t, 5000.0, m.Deficit(), 0.01,
 		"deficit should halve after exactly one half-life")
 }
 
 func TestDRRStrategy_DecayDeficit_NegativeDeficitDecays(t *testing.T) {
 	m := &ProgramMetrics{}
-	m.DeductTokens(10000) // deficit = -10000
+	m.DeductTokens(10000.0) // deficit = -10000
 
 	now := time.Now()
 	m.DecayDeficitTimed(60.0, now)
 	m.DecayDeficitTimed(60.0, now.Add(60*time.Second))
 
-	assert.Equal(t, int64(-5000), m.Deficit(),
+	assert.InDelta(t, -5000.0, m.Deficit(), 0.01,
 		"negative deficit should also decay toward zero")
 }
 
@@ -270,43 +270,51 @@ func TestDRRStrategy_DecayDeficit_ConsistentWindow(t *testing.T) {
 	single := m1.Deficit()
 
 	m2 := &ProgramMetrics{}
-	m2.AddDeficit(10000)
+	m2.AddDeficit(10000.0)
 	m2.DecayDeficitTimed(60.0, now)
 	for i := 1; i <= 100; i++ {
 		m2.DecayDeficitTimed(60.0, now.Add(time.Duration(i)*600*time.Millisecond))
 	}
 	many := m2.Deficit()
 
-	// Wider tolerance than LAS (which uses float64) because int64 truncation
-	// on each intermediate step compounds rounding error.
-	assert.InDelta(t, float64(single), float64(many), 50.0,
+	assert.InDelta(t, single, many, 0.01,
 		"time-based decay should be consistent regardless of call frequency")
 }
 
-func TestDRRStrategy_Pick_IdleDecaysDeficit(t *testing.T) {
+func TestDRRStrategy_Decay_DecaysAllPrograms(t *testing.T) {
 	s := testDRRWithDecay(60.0)
 	m := &ProgramMetrics{}
-	m.AddDeficit(10000)
+	m.AddDeficit(10000.0)
+
+	programs := map[string]*ProgramMetrics{"prog": m}
+
+	// First call initializes timestamp.
+	s.Decay(programs)
+	assert.InDelta(t, 10000.0, m.Deficit(), 0.01, "first decay call only sets timestamp")
+
+	// Simulate one half-life passing.
+	m.mu.Lock()
+	m.lastDeficitDecay = m.lastDeficitDecay.Add(-60 * time.Second)
+	m.mu.Unlock()
+
+	s.Decay(programs)
+	assert.InDelta(t, 5000.0, m.Deficit(), 1.0, "deficit should halve after one half-life")
+}
+
+func TestDRRStrategy_Pick_NoDecayOnNonEmpty_WithQuantum(t *testing.T) {
+	s := testDRRWithDecay(60.0)
+	m := &ProgramMetrics{}
+	m.AddDeficit(10000.0)
 	now := time.Now()
 
-	// Initialize the decay timer.
-	m.DecayDeficitTimed(60.0, now)
-
-	// Simulate 60s later (one half-life) — deficit should halve.
-	m.DecayDeficitTimed(60.0, now.Add(60*time.Second))
-	assert.Equal(t, int64(5000), m.Deficit(),
-		"idle queue deficit should halve after one half-life")
-
-	// Verify Pick on non-empty queue adds quantum without decay.
-	m2 := &ProgramMetrics{}
-	m2.AddDeficit(10000)
-	queues2 := map[string]QueueInfo{"prog": makeQueueInfo("prog", 1, m2, now)}
-	s.Pick(0, queues2)
-	assert.Equal(t, 10000+defaultDRRQuantumTokens, m2.Deficit(),
+	// Pick on non-empty queue adds quantum without decay.
+	queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 1, m, now)}
+	s.Pick(0, queues)
+	assert.InDelta(t, 10000.0+float64(defaultDRRQuantumTokens), m.Deficit(), 0.01,
 		"non-empty queue should get quantum, no decay")
 }
 
-func TestDRRStrategy_Pick_NoDecayOnNonEmpty(t *testing.T) {
+func TestDRRStrategy_Pick_NoDecayInPick(t *testing.T) {
 	s := testDRRWithDecay(60.0)
 	m := &ProgramMetrics{}
 	now := time.Now()
@@ -316,20 +324,19 @@ func TestDRRStrategy_Pick_NoDecayOnNonEmpty(t *testing.T) {
 		s.Pick(0, queues)
 		s.OnPreRequest(nil, testRequest())
 	}
-	// All 100 quanta should have accumulated — no decay on non-empty queues.
-	assert.Equal(t, defaultDRRQuantumTokens*100, m.Deficit(),
-		"non-empty queues should not be decayed")
+	// All 100 quanta should have accumulated — Pick does not decay.
+	assert.InDelta(t, float64(defaultDRRQuantumTokens)*100, m.Deficit(), 0.01,
+		"Pick should not decay deficit (decay is in background loop)")
 }
 
-func TestDRRStrategy_Pick_NoDecayWhenDisabled(t *testing.T) {
+func TestDRRStrategy_Decay_NoDecayWhenDisabled(t *testing.T) {
 	s := testDRR() // deficitHalfLifeSeconds = 0 (no decay)
 	m := &ProgramMetrics{}
-	m.AddDeficit(10000)
+	m.AddDeficit(10000.0)
 
-	// Empty queue with decay disabled — deficit should not change.
-	queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
-	s.Pick(0, queues)
-	assert.Equal(t, int64(10000), m.Deficit(),
+	programs := map[string]*ProgramMetrics{"prog": m}
+	s.Decay(programs)
+	assert.InDelta(t, 10000.0, m.Deficit(), 0.01,
 		"with deficitHalfLifeSeconds=0, no decay should occur")
 }
 
@@ -358,13 +365,13 @@ func TestDRR_Pick_TokenHeavyProgramDeprioritized(t *testing.T) {
 
 	// "heavy" has consumed many tokens relative to its quantum allocation.
 	mHeavy := p.getOrCreateMetrics("heavy")
-	mHeavy.AddDeficit(defaultDRRQuantumTokens * 2)
-	mHeavy.DeductTokens(defaultDRRQuantumTokens * 10)
+	mHeavy.AddDeficit(float64(defaultDRRQuantumTokens) * 2)
+	mHeavy.DeductTokens(float64(defaultDRRQuantumTokens) * 10)
 
 	// "light" has only consumed its fair share.
 	mLight := p.getOrCreateMetrics("light")
-	mLight.AddDeficit(defaultDRRQuantumTokens * 2)
-	mLight.DeductTokens(defaultDRRQuantumTokens * 1)
+	mLight.AddDeficit(float64(defaultDRRQuantumTokens) * 2)
+	mLight.DeductTokens(float64(defaultDRRQuantumTokens) * 1)
 
 	now := time.Now()
 	queueHeavy := &fcmocks.MockFlowQueueAccessor{
@@ -404,9 +411,9 @@ func TestDRR_Pick_TokenHeavyProgramDeprioritized(t *testing.T) {
 // testService returns a LASStrategy with default weights for tests.
 func testService() *LASStrategy {
 	return &LASStrategy{
-		weightService:  defaultServiceWeightService,
-		weightHeadWait: defaultServiceWeightHeadWait,
-		decayFactor:    defaultServiceDecayFactor,
+		weightService:   defaultServiceWeightService,
+		weightHeadWait:  defaultServiceWeightHeadWait,
+		halfLifeSeconds: defaultServiceHalfLifeSeconds,
 	}
 }
 
@@ -415,17 +422,27 @@ func TestLASStrategy_Name(t *testing.T) {
 	assert.Equal(t, "las", s.Name())
 }
 
-func TestLASStrategy_Pick_DecaysService(t *testing.T) {
-	s := testService()
+func TestLASStrategy_Decay_DecaysService(t *testing.T) {
+	s := &LASStrategy{
+		weightService:   defaultServiceWeightService,
+		weightHeadWait:  defaultServiceWeightHeadWait,
+		halfLifeSeconds: 10,
+	}
 	m := &ProgramMetrics{}
 	m.AddService(1000.0)
-	now := time.Now()
 
-	queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 5, m, now)}
-	s.Pick(0, queues)
+	// Initialize the decay timestamp.
+	programs := map[string]*ProgramMetrics{"prog": m}
+	s.Decay(programs)
+	assert.InDelta(t, 1000.0, m.AttainedService(), 0.01, "first call initializes timestamp only")
 
-	assert.InDelta(t, 1000.0*defaultServiceDecayFactor, m.AttainedService(), 0.01,
-		"Pick should decay attained service")
+	// Simulate 10 seconds passing (one half-life).
+	m.mu.Lock()
+	m.lastDecayTime = m.lastDecayTime.Add(-10 * time.Second)
+	m.mu.Unlock()
+
+	s.Decay(programs)
+	assert.InDelta(t, 500.0, m.AttainedService(), 1.0, "service should halve after one half-life")
 }
 
 func TestLASStrategy_OnCompleted_AddsService(t *testing.T) {
@@ -480,19 +497,27 @@ func TestLASStrategy_Pick_ColdStartUsesHeadWait(t *testing.T) {
 }
 
 func TestLASStrategy_DecayForgetsOldService(t *testing.T) {
-	s := testService()
+	s := &LASStrategy{
+		weightService:   defaultServiceWeightService,
+		weightHeadWait:  defaultServiceWeightHeadWait,
+		halfLifeSeconds: 10,
+	}
 	m := &ProgramMetrics{}
 	m.AddService(1000.0)
-	now := time.Now()
 
-	// After many decay cycles, service should approach 0.
-	for range 1000 {
-		queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 1, m, now)}
-		s.Pick(0, queues)
-	}
-	// 1000 * 0.995^1000 ≈ 6.7 — verify significant decay occurred.
-	assert.Less(t, m.AttainedService(), 10.0,
-		"after 1000 decay cycles, attained service should be nearly forgotten")
+	programs := map[string]*ProgramMetrics{"prog": m}
+
+	// Initialize timestamp.
+	s.Decay(programs)
+
+	// Simulate 100 seconds (10 half-lives): 1000 * 0.5^10 ≈ 0.98
+	m.mu.Lock()
+	m.lastDecayTime = m.lastDecayTime.Add(-100 * time.Second)
+	m.mu.Unlock()
+
+	s.Decay(programs)
+	assert.Less(t, m.AttainedService(), 1.0,
+		"after 10 half-lives, attained service should be nearly forgotten")
 }
 
 func TestNewStrategy_LAS(t *testing.T) {
@@ -858,6 +883,6 @@ func TestDRR_Pick_QuantumAllocatedDuringPick(t *testing.T) {
 	betaMetrics, _ := p.programMetrics.Load("beta")
 
 	// Deficit after Pick() = quantumTokens (added by strategy.Pick(), not yet deducted)
-	assert.Equal(t, defaultDRRQuantumTokens, alphaMetrics.(*ProgramMetrics).Deficit())
-	assert.Equal(t, defaultDRRQuantumTokens, betaMetrics.(*ProgramMetrics).Deficit())
+	assert.InDelta(t, float64(defaultDRRQuantumTokens), alphaMetrics.(*ProgramMetrics).Deficit(), 0.01)
+	assert.InDelta(t, float64(defaultDRRQuantumTokens), betaMetrics.(*ProgramMetrics).Deficit(), 0.01)
 }
