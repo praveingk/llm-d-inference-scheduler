@@ -29,6 +29,10 @@ type ScoringStrategy interface {
 
 	// OnCompleted is called when a response finishes with actual token usage.
 	OnCompleted(metrics *ProgramMetrics, request *scheduling.InferenceRequest, response *requestcontrol.Response)
+
+	// Decay applies time-based decay to all program metrics. Called by the
+	// background decay loop at a configurable interval.
+	Decay(programs map[string]*ProgramMetrics)
 }
 
 // QueueInfo bundles read-only data for each queue passed to Pick.
@@ -52,8 +56,7 @@ func newStrategy(cfg Config) (ScoringStrategy, error) {
 		return &LASStrategy{
 			weightService:   floatOr(cfg.WeightService, defaultServiceWeightService),
 			weightHeadWait:  floatOr(cfg.WeightServiceHeadWait, defaultServiceWeightHeadWait),
-			decayFactor:     floatOr(cfg.ServiceDecayFactor, defaultServiceDecayFactor),
-			halfLifeSeconds: floatOr(cfg.ServiceHalfLifeSeconds, 0),
+			halfLifeSeconds: floatOr(cfg.ServiceHalfLifeSeconds, defaultServiceHalfLifeSeconds),
 		}, nil
 	case "rr":
 		return &RRStrategy{
@@ -120,8 +123,8 @@ const (
 //   - "bytes"   = prompt + completion tokens (actual cost known at response completion)
 //   - "quantum" = quantumTokens added per Pick() cycle per non-empty queue
 //   - Actual token cost is deducted in OnCompleted() (ResponseComplete hook)
-//   - Idle (empty) queues do not receive quantum; instead their deficit is
-//     time-decayed (half-life configurable) so stale credit shrinks toward zero
+//   - Idle (empty) queues do not receive quantum; their deficit is
+//     time-decayed by the background decay loop (half-life configurable)
 //
 // headWaitMs is used as a secondary signal to prevent starvation of
 // new or returning programs that start with deficit=0.
@@ -144,7 +147,7 @@ func (s *DRRStrategy) Name() string { return "drr" }
 // given priority band allocates quantum to non-empty queues in that band;
 // subsequent Pick() calls for the same band in the same cycle skip
 // allocation. OnPreRequest() resets the flag for the dispatched band.
-// Empty queues receive no quantum; instead their deficit is time-decayed.
+// Decay is handled by the background decay loop, not here.
 func (s *DRRStrategy) Pick(bandPriority int, queues map[string]QueueInfo) (flowcontrol.FlowQueueAccessor, map[string]float64) {
 	type entry struct {
 		deficit    float64
@@ -163,7 +166,6 @@ func (s *DRRStrategy) Pick(bandPriority int, queues map[string]QueueInfo) (flowc
 	minDeficit, maxDeficit := 0.0, 0.0
 	minWait, maxWait := 0.0, 0.0
 	first := true
-	now := time.Now()
 
 	for id, qi := range queues {
 		if qi.Metrics == nil {
@@ -171,20 +173,15 @@ func (s *DRRStrategy) Pick(bandPriority int, queues map[string]QueueInfo) (flowc
 		}
 
 		if qi.Len == 0 {
-			// Empty queues: decay existing deficit so stale credit from
-			// long-idle programs does not accumulate unboundedly.
-			if s.deficitHalfLifeSeconds > 0 {
-				qi.Metrics.DecayDeficitTimed(s.deficitHalfLifeSeconds, now)
-			}
 			continue
 		}
 
 		// Non-empty queues: allocate quantum once per cycle per band.
 		if shouldAdd {
-			qi.Metrics.AddDeficit(s.quantumTokens)
+			qi.Metrics.AddDeficit(float64(s.quantumTokens))
 		}
 
-		deficit := float64(qi.Metrics.Deficit())
+		deficit := qi.Metrics.Deficit()
 		var headWaitMs float64
 		if head := qi.Queue.PeekHead(); head != nil {
 			headWaitMs = float64(time.Since(head.EnqueueTime()).Milliseconds())
@@ -246,9 +243,20 @@ func (s *DRRStrategy) OnCompleted(metrics *ProgramMetrics, _ *scheduling.Inferen
 	if metrics == nil || response == nil {
 		return
 	}
-	promptTokens := int64(response.Usage.PromptTokens)
-	completionTokens := int64(response.Usage.CompletionTokens)
+	promptTokens := float64(response.Usage.PromptTokens)
+	completionTokens := float64(response.Usage.CompletionTokens)
 	metrics.DeductTokens(weightInputToken*promptTokens + weightOutputToken*completionTokens)
+}
+
+// Decay applies half-life decay to the deficit counter of all programs.
+func (s *DRRStrategy) Decay(programs map[string]*ProgramMetrics) {
+	if s.deficitHalfLifeSeconds <= 0 {
+		return
+	}
+	now := time.Now()
+	for _, m := range programs {
+		m.DecayDeficitTimed(s.deficitHalfLifeSeconds, now)
+	}
 }
 
 // =============================================================================
@@ -257,9 +265,9 @@ func (s *DRRStrategy) OnCompleted(metrics *ProgramMetrics, _ *scheduling.Inferen
 
 // Default LAS strategy values.
 const (
-	defaultServiceWeightService  float64 = 0.8
-	defaultServiceWeightHeadWait float64 = 0.2
-	defaultServiceDecayFactor    float64 = 0.995
+	defaultServiceWeightService    float64 = 0.8
+	defaultServiceWeightHeadWait   float64 = 0.2
+	defaultServiceHalfLifeSeconds  float64 = 60
 )
 
 // LASStrategy scores queues by equalizing attained service (weighted tokens
@@ -271,16 +279,14 @@ const (
 //   - headWait: age of the oldest request — tiebreaker for cold start when
 //     all programs have zero attained service.
 //
-// On each Pick() cycle, every queue's attained service is decayed by decayFactor,
-// causing old service to be gradually forgotten. On each completion, the actual
-// weighted token cost is added to the program's attained service.
+// Decay is handled by the background decay loop (not in Pick). On each completion,
+// the actual weighted token cost is added to the program's attained service.
 //
-// Weights and decay factor are configurable via the plugin config.
+// Weights and half-life are configurable via the plugin config.
 type LASStrategy struct {
 	weightService   float64
 	weightHeadWait  float64
-	decayFactor     float64
-	halfLifeSeconds float64 // if > 0, use time-based decay instead of per-cycle decayFactor
+	halfLifeSeconds float64
 }
 
 // Name returns "service".
@@ -288,31 +294,23 @@ func (s *LASStrategy) Name() string { return "las" }
 
 // Pick selects the queue with the lowest attained service (highest need).
 //
-// First decays every queue's attained service, then uses two-pass adaptive
-// normalization across non-empty queues. The service dimension is inverted
-// so that lower attained service maps to a higher score.
+// Uses two-pass adaptive normalization across non-empty queues. The service
+// dimension is inverted so that lower attained service maps to a higher score.
+// Decay is handled by the background decay loop, not here.
 func (s *LASStrategy) Pick(_ int, queues map[string]QueueInfo) (flowcontrol.FlowQueueAccessor, map[string]float64) {
 	type entry struct {
 		service    float64
 		headWaitMs float64
 	}
 
-	// Pass 1: decay service for all queues, collect raw values for non-empty.
 	entries := make(map[string]entry)
 	minService, maxService := 0.0, 0.0
 	minWait, maxWait := 0.0, 0.0
 	first := true
-	now := time.Now()
 
 	for id, qi := range queues {
 		if qi.Metrics == nil {
 			continue
-		}
-		// Decay runs for every queue, including empty ones.
-		if s.halfLifeSeconds > 0 {
-			qi.Metrics.DecayServiceTimed(s.halfLifeSeconds, now)
-		} else {
-			qi.Metrics.DecayService(s.decayFactor)
 		}
 
 		if qi.Len == 0 {
@@ -383,6 +381,17 @@ func (s *LASStrategy) OnCompleted(metrics *ProgramMetrics, _ *scheduling.Inferen
 	completionTokens := int64(response.Usage.CompletionTokens)
 	cost := float64(weightInputToken*promptTokens + weightOutputToken*completionTokens)
 	metrics.AddService(cost)
+}
+
+// Decay applies half-life decay to the attained service of all programs.
+func (s *LASStrategy) Decay(programs map[string]*ProgramMetrics) {
+	if s.halfLifeSeconds <= 0 {
+		return
+	}
+	now := time.Now()
+	for _, m := range programs {
+		m.DecayServiceTimed(s.halfLifeSeconds, now)
+	}
 }
 
 // =============================================================================
@@ -475,3 +484,6 @@ func (s *RRStrategy) OnPreRequest(_ *ProgramMetrics, request *scheduling.Inferen
 // OnCompleted is a no-op for round-robin (no token tracking needed).
 func (s *RRStrategy) OnCompleted(_ *ProgramMetrics, _ *scheduling.InferenceRequest, _ *requestcontrol.Response) {
 }
+
+// Decay is a no-op for round-robin.
+func (s *RRStrategy) Decay(_ map[string]*ProgramMetrics) {}

@@ -76,17 +76,14 @@ type Config struct {
 	// Acts as a tiebreaker for cold start. Default: 0.2.
 	WeightServiceHeadWait *float64 `json:"weightServiceHeadWait,omitempty"`
 
-	// ServiceDecayFactor controls how quickly old service is forgotten.
-	// Applied to each program's attained service every Pick() cycle.
-	// Higher values (closer to 1.0) = longer memory. Default: 0.995.
-	// Ignored when ServiceHalfLifeSeconds is set.
-	ServiceDecayFactor *float64 `json:"serviceDecayFactor,omitempty"`
-
-	// ServiceHalfLifeSeconds enables time-based decay for the service strategy.
-	// Defines the half-life in seconds: service decays to 50% after this duration.
-	// When set (> 0), overrides ServiceDecayFactor with wall-clock based decay.
-	// Example: 30 = service halves every 30s regardless of Pick() frequency.
+	// ServiceHalfLifeSeconds defines the half-life in seconds for service decay.
+	// Service decays to 50% after this duration. Decay is applied by the
+	// background decay loop, not in Pick(). Default: 60.
 	ServiceHalfLifeSeconds *float64 `json:"serviceHalfLifeSeconds,omitempty"`
+
+	// DecayIntervalMs is the interval in milliseconds between background decay ticks.
+	// Lower values give smoother decay but use more CPU. Default: 100 (10 ticks/sec).
+	DecayIntervalMs *int64 `json:"decayIntervalMs,omitempty"`
 
 	// --- RR options (only used when strategy == "rr") ---
 
@@ -119,10 +116,18 @@ func ProgramAwarePluginFactory(name string, rawCfg json.RawMessage, _ plugin.Han
 	if err != nil {
 		return nil, fmt.Errorf("%s plugin %q: %w", ProgramAwarePluginType, name, err)
 	}
-	return &ProgramAwarePlugin{
-		name:     name,
-		strategy: strategy,
-	}, nil
+
+	ctx, cancel := context.WithCancel(context.Background())
+	p := &ProgramAwarePlugin{
+		name:      name,
+		strategy:  strategy,
+		stopDecay: cancel,
+	}
+
+	interval := time.Duration(int64Or(cfg.DecayIntervalMs, 100)) * time.Millisecond
+	go p.runDecayLoop(ctx, interval)
+
+	return p, nil
 }
 
 // ProgramAwarePlugin implements a FairnessPolicy that selects which program's
@@ -144,6 +149,9 @@ type ProgramAwarePlugin struct {
 	// used to compute flow-control queue wait time in PreRequest.
 	// Key: request ID (string), Value: time.Time.
 	requestTimestamps sync.Map
+
+	// stopDecay cancels the background decay goroutine.
+	stopDecay context.CancelFunc
 }
 
 // TypedName returns the plugin type and instance name.
@@ -159,9 +167,9 @@ func (p *ProgramAwarePlugin) TypedName() plugin.TypedName {
 func (p *ProgramAwarePlugin) getStrategy() ScoringStrategy {
 	if p.strategy == nil {
 		return &LASStrategy{
-			weightService:  defaultServiceWeightService,
-			weightHeadWait: defaultServiceWeightHeadWait,
-			decayFactor:    defaultServiceDecayFactor,
+			weightService:   defaultServiceWeightService,
+			weightHeadWait:  defaultServiceWeightHeadWait,
+			halfLifeSeconds: defaultServiceHalfLifeSeconds,
 		}
 	}
 	return p.strategy
@@ -257,4 +265,30 @@ func (p *ProgramAwarePlugin) computeFairnessIndex() float64 {
 		return 1.0
 	}
 	return (sum * sum) / (n * sumSq)
+}
+
+// runDecayLoop runs the background decay goroutine at the configured interval.
+func (p *ProgramAwarePlugin) runDecayLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			programs := make(map[string]*ProgramMetrics)
+			p.programMetrics.Range(func(key, value any) bool {
+				programs[key.(string)] = value.(*ProgramMetrics)
+				return true
+			})
+			p.strategy.Decay(programs)
+		}
+	}
+}
+
+// Stop cancels the background decay goroutine.
+func (p *ProgramAwarePlugin) Stop() {
+	if p.stopDecay != nil {
+		p.stopDecay()
+	}
 }
