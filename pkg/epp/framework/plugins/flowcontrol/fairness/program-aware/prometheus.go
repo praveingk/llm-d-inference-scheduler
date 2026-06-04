@@ -92,6 +92,21 @@ var (
 	)
 )
 
+// deleteSharedSeries removes the per-program label series from every shared
+// collector that carries a program_id label. Called by the eviction sweep
+// after a program is removed from the metrics map so its label series do
+// not accumulate forever. Strategy-owned series are dropped by the strategy
+// in its EvictProgram hook.
+func deleteSharedSeries(id string) {
+	requestsTotal.DeleteLabelValues(id)
+	dispatchedTotal.DeleteLabelValues(id)
+	inputTokensTotal.DeleteLabelValues(id)
+	outputTokensTotal.DeleteLabelValues(id)
+	avgWaitTimeMs.DeleteLabelValues(id)
+	serviceRateTokensPerSec.DeleteLabelValues(id)
+	queueScore.DeleteLabelValues(id)
+}
+
 // GetCollectors returns the shared Prometheus collectors for the program-aware
 // plugin. Strategy-owned collectors are exposed via ScoringStrategy.Collectors
 // and registered separately by the plugin factory.

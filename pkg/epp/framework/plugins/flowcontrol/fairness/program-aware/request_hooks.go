@@ -102,7 +102,8 @@ func (p *ProgramAwarePlugin) ResponseBody(ctx context.Context, request *fwksched
 
 	p.getStrategy().OnCompleted(metrics, request, response)
 
-	// Update service rate for fairness index (weighted tokens/sec EWMA).
+	// Update service-rate EWMA (weighted tokens/sec) for observability.
+	// Jain's fairness index reads AverageWaitTime, not ServiceRate.
 	cost := float64(weightInputToken*promptTokens + weightOutputToken*completionTokens)
 	metrics.RecordServiceRate(cost, time.Now())
 	serviceRateTokensPerSec.WithLabelValues(programID).Set(metrics.ServiceRate())

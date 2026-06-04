@@ -342,12 +342,17 @@ func (p *ProgramAwarePlugin) runEviction(ctx context.Context, interval, ttl time
 }
 
 // evictIdle removes metrics entries whose last completion is older than ttl
-// and that have no in-flight requests. Entries with no completions yet are
+// and that have no live requests. Entries with no completions yet are
 // skipped — eviction would race their first completion.
 //
-// The Range/Delete pair is not atomic: a request landing concurrently can
-// recreate a freshly-deleted entry via getOrCreateMetrics, losing one cycle
-// of accumulated state. With a default deficit half-life of 60 s, an
+// "No live requests" means InFlight==0 (nothing dispatched-but-not-completed)
+// AND TotalRequests==DispatchedCount (nothing produced-but-not-dispatched, i.e.
+// still in the flow-control queue). Without the second check, a request
+// landing between Produce and Pick could be evicted from under the dispatcher.
+//
+// The Range/Delete pair is still not atomic: a request landing concurrently
+// can recreate a freshly-deleted entry via getOrCreateMetrics, losing one
+// cycle of accumulated state. With a default deficit half-life of 60 s, an
 // hour-idle program's deficit is ~0 already, so the reset is benign.
 func (p *ProgramAwarePlugin) evictIdle(ttl time.Duration) {
 	now := time.Now()
@@ -359,6 +364,9 @@ func (p *ProgramAwarePlugin) evictIdle(ttl time.Duration) {
 		if m.InFlight() != 0 {
 			return true
 		}
+		if m.TotalRequests() != m.DispatchedCount() {
+			return true
+		}
 		last := m.LastCompletionTime()
 		if last.IsZero() || now.Sub(last) <= ttl {
 			return true
@@ -366,6 +374,7 @@ func (p *ProgramAwarePlugin) evictIdle(ttl time.Duration) {
 		p.programMetrics.Delete(key)
 		if id, ok := key.(string); ok {
 			p.getStrategy().EvictProgram(id)
+			deleteSharedSeries(id)
 		}
 		return true
 	})

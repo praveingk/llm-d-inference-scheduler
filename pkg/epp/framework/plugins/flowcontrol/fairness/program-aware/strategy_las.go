@@ -180,9 +180,11 @@ func (s *LASStrategy) OnCompleted(_ *ProgramMetrics, request *fwksched.Inference
 	attainedServiceTokensGauge.WithLabelValues(id).Set(service)
 }
 
-// EvictProgram drops the per-program attained-service state.
+// EvictProgram drops the per-program attained-service state and its Prom
+// label series.
 func (s *LASStrategy) EvictProgram(id string) {
 	s.state.Delete(id)
+	attainedServiceTokensGauge.DeleteLabelValues(id)
 }
 
 // Collectors returns the Prometheus collectors owned by LAS.

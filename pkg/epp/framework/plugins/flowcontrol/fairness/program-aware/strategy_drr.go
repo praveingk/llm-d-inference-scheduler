@@ -192,9 +192,10 @@ func (s *DRRStrategy) OnCompleted(_ *ProgramMetrics, request *fwksched.Inference
 	st.mu.Unlock()
 }
 
-// EvictProgram drops the per-program deficit state.
+// EvictProgram drops the per-program deficit state and its Prom label series.
 func (s *DRRStrategy) EvictProgram(id string) {
 	s.state.Delete(id)
+	deficitTokensGauge.DeleteLabelValues(id)
 }
 
 // Collectors returns the Prometheus collectors owned by DRR.
