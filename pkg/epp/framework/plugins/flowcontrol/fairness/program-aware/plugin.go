@@ -108,22 +108,25 @@ type Config struct {
 	EvictionSweepSeconds float64 `json:"evictionSweepSeconds,omitempty"`
 }
 
-// DefaultConfig is the canonical Config used when JSON parameters are absent
-// or partial. The factory makes a copy of this value before decoding, so
-// every fairness-plugin default lives in one place.
-var DefaultConfig = Config{
-	Strategy:               "las",
-	WeightDeficit:          0.8,
-	WeightDRRHeadWait:      0.2,
-	QuantumTokens:          1000,
-	DeficitHalfLifeSeconds: 0,
-	DeficitDecayFactor:     0.99997,
-	WeightService:          0.8,
-	WeightServiceHeadWait:  0.2,
-	ServiceDecayFactor:     0.99997,
-	ServiceHalfLifeSeconds: 0,
-	EvictionTTLSeconds:     3600,
-	EvictionSweepSeconds:   300,
+// DefaultConfig returns the canonical Config used when JSON parameters are
+// absent or partial. Returned by value so callers cannot mutate a shared
+// default through the package, ensuring defaults stay stable over the
+// plugin's lifetime.
+func DefaultConfig() Config {
+	return Config{
+		Strategy:               "las",
+		WeightDeficit:          0.8,
+		WeightDRRHeadWait:      0.2,
+		QuantumTokens:          1000,
+		DeficitHalfLifeSeconds: 0,
+		DeficitDecayFactor:     0.99997,
+		WeightService:          0.8,
+		WeightServiceHeadWait:  0.2,
+		ServiceDecayFactor:     0.99997,
+		ServiceHalfLifeSeconds: 0,
+		EvictionTTLSeconds:     3600,
+		EvictionSweepSeconds:   300,
+	}
 }
 
 // validate checks that numeric fields fall in the ranges the scoring
@@ -182,7 +185,7 @@ var (
 //
 //nolint:revive // factory name matches sibling fairness plugins; see comment above.
 func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
-	cfg := DefaultConfig
+	cfg := DefaultConfig()
 	if parameters != nil {
 		if err := parameters.Decode(&cfg); err != nil {
 			return nil, fmt.Errorf("invalid config for %s plugin %q: %w", ProgramAwarePluginType, name, err)
@@ -248,7 +251,7 @@ func (p *ProgramAwarePlugin) TypedName() plugin.TypedName {
 // directly in tests. DefaultConfig is known-valid so newStrategy cannot fail.
 func (p *ProgramAwarePlugin) getStrategy() ScoringStrategy {
 	if p.strategy == nil {
-		s, _ := newStrategy(DefaultConfig)
+		s, _ := newStrategy(DefaultConfig())
 		return s
 	}
 	return p.strategy

@@ -21,9 +21,9 @@ import (
 // testDRR returns a DRRStrategy with default weights for tests.
 func testDRR() *DRRStrategy {
 	return &DRRStrategy{
-		weightDeficit:  DefaultConfig.WeightDeficit,
-		weightHeadWait: DefaultConfig.WeightDRRHeadWait,
-		quantumTokens:  DefaultConfig.QuantumTokens,
+		weightDeficit:  DefaultConfig().WeightDeficit,
+		weightHeadWait: DefaultConfig().WeightDRRHeadWait,
+		quantumTokens:  DefaultConfig().QuantumTokens,
 	}
 }
 
@@ -155,7 +155,7 @@ func TestDRRStrategy_Pick_AllocatesQuantum(t *testing.T) {
 	queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 3, m, now)}
 	s.Pick(0, queues)
 
-	assert.Equal(t, DefaultConfig.QuantumTokens, drrDeficit(s, "prog"), "non-empty queue should receive quantum")
+	assert.Equal(t, DefaultConfig().QuantumTokens, drrDeficit(s, "prog"), "non-empty queue should receive quantum")
 }
 
 func TestDRRStrategy_Pick_QuantumAccumulates(t *testing.T) {
@@ -167,7 +167,7 @@ func TestDRRStrategy_Pick_QuantumAccumulates(t *testing.T) {
 		queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 1, m, now)}
 		s.Pick(0, queues)
 	}
-	assert.Equal(t, DefaultConfig.QuantumTokens*5, drrDeficit(s, "prog"), "deficit should accumulate across rounds")
+	assert.Equal(t, DefaultConfig().QuantumTokens*5, drrDeficit(s, "prog"), "deficit should accumulate across rounds")
 }
 
 func TestDRRStrategy_Pick_IdleNoQuantum(t *testing.T) {
@@ -180,17 +180,17 @@ func TestDRRStrategy_Pick_IdleNoQuantum(t *testing.T) {
 		queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 2, m, now)}
 		s.Pick(0, queues)
 	}
-	assert.Equal(t, DefaultConfig.QuantumTokens*3, drrDeficit(s, "prog"))
+	assert.Equal(t, DefaultConfig().QuantumTokens*3, drrDeficit(s, "prog"))
 
 	// Queue drains — deficit should NOT increase (no quantum for empty queues).
 	queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
 	s.Pick(0, queues)
-	assert.Equal(t, DefaultConfig.QuantumTokens*3, drrDeficit(s, "prog"), "idle queues do not receive quantum")
+	assert.Equal(t, DefaultConfig().QuantumTokens*3, drrDeficit(s, "prog"), "idle queues do not receive quantum")
 }
 
 func TestDRRStrategy_OnCompleted_DeductsTokens(t *testing.T) {
 	s := testDRR()
-	drrSeedDeficit(s, metadata.DefaultFairnessID, DefaultConfig.QuantumTokens) // one round of quantum
+	drrSeedDeficit(s, metadata.DefaultFairnessID, DefaultConfig().QuantumTokens) // one round of quantum
 
 	req := &fwksched.InferenceRequest{}
 	resp := &fwkrc.Response{Usage: requesthandling.Usage{PromptTokens: 700, CompletionTokens: 300}}
@@ -200,7 +200,7 @@ func TestDRRStrategy_OnCompleted_DeductsTokens(t *testing.T) {
 
 func TestDRRStrategy_OnCompleted_GoesNegativeOnOveruse(t *testing.T) {
 	s := testDRR()
-	drrSeedDeficit(s, metadata.DefaultFairnessID, DefaultConfig.QuantumTokens) // 1000 tokens
+	drrSeedDeficit(s, metadata.DefaultFairnessID, DefaultConfig().QuantumTokens) // 1000 tokens
 
 	req := &fwksched.InferenceRequest{}
 	resp := &fwkrc.Response{Usage: requesthandling.Usage{PromptTokens: 1500, CompletionTokens: 500}}
@@ -237,10 +237,10 @@ func TestDRRStrategy_Pick_QuantumPerPick(t *testing.T) {
 
 	queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 3, m, now)}
 	s.Pick(0, queues)
-	assert.Equal(t, DefaultConfig.QuantumTokens, drrDeficit(s, "prog"), "first Pick allocates quantum")
+	assert.Equal(t, DefaultConfig().QuantumTokens, drrDeficit(s, "prog"), "first Pick allocates quantum")
 
 	s.Pick(0, queues)
-	assert.Equal(t, DefaultConfig.QuantumTokens*2, drrDeficit(s, "prog"),
+	assert.Equal(t, DefaultConfig().QuantumTokens*2, drrDeficit(s, "prog"),
 		"each Pick allocates quantum (one Pick == one dispatch)")
 }
 
@@ -250,9 +250,9 @@ func TestDRRStrategy_Pick_QuantumPerPick(t *testing.T) {
 
 func testDRRWithDecay(halfLife float64) *DRRStrategy {
 	return &DRRStrategy{
-		weightDeficit:          DefaultConfig.WeightDeficit,
-		weightHeadWait:         DefaultConfig.WeightDRRHeadWait,
-		quantumTokens:          DefaultConfig.QuantumTokens,
+		weightDeficit:          DefaultConfig().WeightDeficit,
+		weightHeadWait:         DefaultConfig().WeightDRRHeadWait,
+		quantumTokens:          DefaultConfig().QuantumTokens,
 		deficitHalfLifeSeconds: halfLife,
 	}
 }
@@ -316,7 +316,7 @@ func TestDRRStrategy_Pick_NoDecayOnNonEmpty(t *testing.T) {
 		s.Pick(0, queues)
 	}
 	// All 100 quanta should have accumulated — no decay on non-empty queues.
-	assert.Equal(t, DefaultConfig.QuantumTokens*100, drrDeficit(s, "prog"),
+	assert.Equal(t, DefaultConfig().QuantumTokens*100, drrDeficit(s, "prog"),
 		"non-empty queues should not be decayed")
 }
 
@@ -345,7 +345,7 @@ func TestFactory_DeficitHalfLifeSecondsDefault(t *testing.T) {
 	require.NoError(t, err)
 	pap := p.(*ProgramAwarePlugin)
 	drr := pap.strategy.(*DRRStrategy)
-	assert.Equal(t, DefaultConfig.DeficitHalfLifeSeconds, drr.deficitHalfLifeSeconds)
+	assert.Equal(t, DefaultConfig().DeficitHalfLifeSeconds, drr.deficitHalfLifeSeconds)
 }
 
 func TestFactory_DeficitDecayFactor(t *testing.T) {
@@ -358,9 +358,9 @@ func TestFactory_DeficitDecayFactor(t *testing.T) {
 
 func testDRRWithFactor(factor float64) *DRRStrategy {
 	return &DRRStrategy{
-		weightDeficit:  DefaultConfig.WeightDeficit,
-		weightHeadWait: DefaultConfig.WeightDRRHeadWait,
-		quantumTokens:  DefaultConfig.QuantumTokens,
+		weightDeficit:  DefaultConfig().WeightDeficit,
+		weightHeadWait: DefaultConfig().WeightDRRHeadWait,
+		quantumTokens:  DefaultConfig().QuantumTokens,
 		decayFactor:    factor,
 	}
 }
@@ -398,15 +398,15 @@ func TestDRRStrategy_DecayDeficit_FactorBased_SkipsActive(t *testing.T) {
 
 	queues := map[string]QueueInfo{"prog": makeQueueInfo("prog", 1, m, now)}
 	s.Pick(0, queues)
-	assert.Equal(t, 10000+DefaultConfig.QuantumTokens, drrDeficit(s, "prog"),
+	assert.Equal(t, 10000+DefaultConfig().QuantumTokens, drrDeficit(s, "prog"),
 		"non-empty queue should receive quantum, not factor-decay")
 }
 
 func TestDRRStrategy_TimeBasedWinsWhenBothConfigured(t *testing.T) {
 	s := &DRRStrategy{
-		weightDeficit:          DefaultConfig.WeightDeficit,
-		weightHeadWait:         DefaultConfig.WeightDRRHeadWait,
-		quantumTokens:          DefaultConfig.QuantumTokens,
+		weightDeficit:          DefaultConfig().WeightDeficit,
+		weightHeadWait:         DefaultConfig().WeightDRRHeadWait,
+		quantumTokens:          DefaultConfig().QuantumTokens,
 		deficitHalfLifeSeconds: 60.0,
 		decayFactor:            0.5, // should be ignored
 	}
@@ -446,11 +446,11 @@ func TestDRR_Pick_TokenHeavyProgramDeprioritized(t *testing.T) {
 
 	// "heavy" has consumed many tokens relative to its quantum allocation.
 	_ = p.getOrCreateMetrics("heavy")
-	drrSeedDeficit(drr, "heavy", DefaultConfig.QuantumTokens*2-DefaultConfig.QuantumTokens*10)
+	drrSeedDeficit(drr, "heavy", DefaultConfig().QuantumTokens*2-DefaultConfig().QuantumTokens*10)
 
 	// "light" has only consumed its fair share.
 	_ = p.getOrCreateMetrics("light")
-	drrSeedDeficit(drr, "light", DefaultConfig.QuantumTokens*2-DefaultConfig.QuantumTokens*1)
+	drrSeedDeficit(drr, "light", DefaultConfig().QuantumTokens*2-DefaultConfig().QuantumTokens*1)
 
 	now := time.Now()
 	queueHeavy := &fwkfcmocks.MockFlowQueueAccessor{
@@ -490,9 +490,9 @@ func TestDRR_Pick_TokenHeavyProgramDeprioritized(t *testing.T) {
 // testService returns a LASStrategy with default weights for tests.
 func testService() *LASStrategy {
 	return &LASStrategy{
-		weightService:  DefaultConfig.WeightService,
-		weightHeadWait: DefaultConfig.WeightServiceHeadWait,
-		decayFactor:    DefaultConfig.ServiceDecayFactor,
+		weightService:  DefaultConfig().WeightService,
+		weightHeadWait: DefaultConfig().WeightServiceHeadWait,
+		decayFactor:    DefaultConfig().ServiceDecayFactor,
 	}
 }
 
@@ -525,7 +525,7 @@ func TestLASStrategy_Pick_DecaysInactiveService(t *testing.T) {
 	queues := map[string]QueueInfo{"prog": makeEmptyQueueInfo("prog", m)}
 	s.Pick(0, queues)
 
-	assert.InDelta(t, 1000.0*DefaultConfig.ServiceDecayFactor, lasService(s, "prog"), 0.01,
+	assert.InDelta(t, 1000.0*DefaultConfig().ServiceDecayFactor, lasService(s, "prog"), 0.01,
 		"Pick should decay attained service for inactive queue")
 }
 
@@ -612,7 +612,7 @@ func TestLASStrategy_DecayForgetsOldService(t *testing.T) {
 	lasSeedService(s, "prog", 1000.0)
 
 	// After many decay cycles on an inactive queue, service should approach 0.
-	// With DefaultConfig.ServiceDecayFactor = 0.99997, the factor's per-cycle
+	// With DefaultConfig().ServiceDecayFactor = 0.99997, the factor's per-cycle
 	// half-life is ~23,105 cycles, so meaningful decay requires a large number
 	// of iterations.
 	for range 200000 {
@@ -639,8 +639,8 @@ func TestFactory_LASStrategy(t *testing.T) {
 
 func testServiceTimed(halfLife float64) *LASStrategy {
 	return &LASStrategy{
-		weightService:   DefaultConfig.WeightService,
-		weightHeadWait:  DefaultConfig.WeightServiceHeadWait,
+		weightService:   DefaultConfig().WeightService,
+		weightHeadWait:  DefaultConfig().WeightServiceHeadWait,
 		halfLifeSeconds: halfLife,
 	}
 }
@@ -887,8 +887,8 @@ func TestDRR_Pick_QuantumAllocatedDuringPick(t *testing.T) {
 
 	// Both queues should have received a quantum during Pick().
 	// Deficit after Pick() = quantumTokens (added by strategy.Pick(), not yet deducted).
-	assert.Equal(t, DefaultConfig.QuantumTokens, drrDeficit(drr, "alpha"))
-	assert.Equal(t, DefaultConfig.QuantumTokens, drrDeficit(drr, "beta"))
+	assert.Equal(t, DefaultConfig().QuantumTokens, drrDeficit(drr, "alpha"))
+	assert.Equal(t, DefaultConfig().QuantumTokens, drrDeficit(drr, "beta"))
 }
 
 // =============================================================================
