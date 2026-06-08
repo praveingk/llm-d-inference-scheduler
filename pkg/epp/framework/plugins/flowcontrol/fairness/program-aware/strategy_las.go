@@ -24,7 +24,8 @@ const (
 type lasState struct {
 	mu              sync.Mutex
 	attainedService float64
-	lastDecay       time.Time
+	// decayAnchor is the wall-clock anchor for time-based decay; updated on AddService and Decay.
+	decayAnchor time.Time
 }
 
 func (s *lasState) Service() float64 {
@@ -37,6 +38,7 @@ func (s *lasState) AddService(cost float64) float64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.attainedService += cost
+	s.decayAnchor = time.Now()
 	return s.attainedService
 }
 
@@ -46,16 +48,16 @@ func (s *lasState) Decay(now time.Time, halfLifeSeconds, factor float64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if halfLifeSeconds > 0 {
-		if s.lastDecay.IsZero() {
-			s.lastDecay = now
+		if s.decayAnchor.IsZero() {
+			s.decayAnchor = now
 			return
 		}
-		elapsed := now.Sub(s.lastDecay).Seconds()
+		elapsed := now.Sub(s.decayAnchor).Seconds()
 		if elapsed <= 0 {
 			return
 		}
 		s.attainedService *= math.Pow(0.5, elapsed/halfLifeSeconds)
-		s.lastDecay = now
+		s.decayAnchor = now
 		return
 	}
 	s.attainedService *= factor

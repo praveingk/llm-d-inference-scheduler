@@ -117,7 +117,7 @@ func TestLAS_OnCompleted_NilSafe(t *testing.T) {
 func TestLAS_TimedDecay_HalvesAtHalfLife(t *testing.T) {
 	st := &lasState{attainedService: 100}
 	now := time.Now()
-	st.lastDecay = now.Add(-1 * time.Second) // one half-life ago
+	st.decayAnchor = now.Add(-1 * time.Second) // one half-life ago
 
 	st.Decay(now, 1.0, 0)
 
