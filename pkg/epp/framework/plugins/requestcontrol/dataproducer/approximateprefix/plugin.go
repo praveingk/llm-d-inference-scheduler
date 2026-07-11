@@ -268,11 +268,16 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	}
 
 	targetEndpoint := primaryProfileResult.TargetEndpoints[0]
-	servers := []server{p.makeserver(targetEndpoint)}
+	endpoints := []fwksched.Endpoint{targetEndpoint}
 
 	// Also record for prefill node if present in P/D disaggregated mode.
 	if pr, exists := schedulingResult.ProfileResults[experimentalDefaultPrefillProfile]; exists && len(pr.TargetEndpoints) > 0 {
-		servers = append(servers, p.makeserver(pr.TargetEndpoints[0]))
+		endpoints = append(endpoints, pr.TargetEndpoints[0])
+	}
+
+	servers := make([]server, 0, len(endpoints))
+	for _, ep := range endpoints {
+		servers = append(servers, p.makeserver(ep))
 	}
 
 	// Read state saved during Produce.
@@ -291,15 +296,20 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 		}
 	})
 
-	// Record metrics. Lengths are reported as a byte estimate (~averageCharactersPerToken bytes/token).
+	// Record metrics per endpoint the request touched (decode primary plus the
+	// prefill node in P/D mode), so cache reuse is attributed per pod.
+	// Lengths are reported as a byte estimate (~averageCharactersPerToken bytes/token).
 	total := 0
 	for _, hashes := range state.PerPromptHashes {
 		total += len(hashes)
 	}
-	matchLen := state.PrefixCacheServers[ServerID(targetEndpoint.GetMetadata().NamespacedName)]
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
 	const averageCharactersPerToken = 4
-	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*averageCharactersPerToken, total*blockSize*averageCharactersPerToken)
+	for _, ep := range endpoints {
+		namespacedName := ep.GetMetadata().NamespacedName
+		matchLen := state.PrefixCacheServers[ServerID(namespacedName)]
+		recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, namespacedName.String(), matchLen*blockSize*averageCharactersPerToken, total*blockSize*averageCharactersPerToken)
+	}
 }
 
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {

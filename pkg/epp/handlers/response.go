@@ -82,7 +82,14 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 		metrics.RecordInputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.Usage.PromptTokens)
 		metrics.RecordOutputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.Usage.CompletionTokens)
 		if reqCtx.Usage.PromptTokenDetails != nil {
-			metrics.RecordPromptCachedTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.Usage.PromptTokenDetails.CachedTokens)
+			// The response's cached-token count comes from the pod that served it
+			// (the decode pod in P/D mode). Label it with that single endpoint
+			// rather than the comma-joined TargetEndpoint routing string.
+			endpoint := ""
+			if reqCtx.TargetPod != nil {
+				endpoint = reqCtx.TargetPod.GetNamespacedName().String()
+			}
+			metrics.RecordPromptCachedTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, endpoint, reqCtx.Usage.PromptTokenDetails.CachedTokens)
 		}
 	}
 	if endOfStream {

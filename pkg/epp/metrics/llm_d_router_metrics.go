@@ -116,7 +116,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Distribution of prompt tokens read from cache per request, as reported by the model server in the response.", compbasemetrics.ALPHA),
 			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536, 131072, 262144, 524288, 1048576},
 		},
-		modelLabelsWithFairnessPriority,
+		append(append([]string{}, modelLabelsWithFairnessPriority...), "endpoint"),
 	)
 
 	llmdRunningRequests = prometheus.NewGaugeVec(

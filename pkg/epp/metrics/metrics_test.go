@@ -474,7 +474,7 @@ func TestRecordResponseMetrics(t *testing.T) {
 				RecordInputTokens(resp.modelName, resp.targetModelName, "", "0", resp.inputToken)
 				RecordOutputTokens(resp.modelName, resp.targetModelName, "", "0", resp.outputToken)
 				RecordResponseSizes(resp.modelName, resp.targetModelName, "", "0", resp.respSize)
-				RecordPromptCachedTokens(resp.modelName, resp.targetModelName, "", "0", resp.cachedToken)
+				RecordPromptCachedTokens(resp.modelName, resp.targetModelName, "", "0", "", resp.cachedToken)
 			}
 
 			// Verify deprecated metrics

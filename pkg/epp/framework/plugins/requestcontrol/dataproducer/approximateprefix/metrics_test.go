@@ -39,8 +39,8 @@ func TestRecordPrefixCacheMetrics(t *testing.T) {
 	t.Cleanup(resetMetrics)
 
 	recordPrefixCacheSize("test-plugin", "test-type", 4096)
-	recordPrefixCacheMatch("test-plugin", "test-type", 10, 20)
-	recordPrefixCacheMatch("test-plugin", "test-type", 0, 0)
+	recordPrefixCacheMatch("test-plugin", "test-type", "test-endpoint", 10, 20)
+	recordPrefixCacheMatch("test-plugin", "test-type", "test-endpoint", 0, 0)
 
 	require.Equal(t, float64(4096), testutil.ToFloat64(prefixCacheSize.WithLabelValues()))
 	require.Equal(t, float64(4096), testutil.ToFloat64(llmdPrefixCacheSize.WithLabelValues("test-plugin", "test-type")))
@@ -50,7 +50,7 @@ func TestRecordPrefixCacheMetrics(t *testing.T) {
 	require.Equal(t, uint64(1), hitRatio.GetSampleCount())
 	require.Equal(t, 0.5, hitRatio.GetSampleSum())
 
-	llmdHitRatio, err := getHistogram(llmdPrefixCacheHitRatio, "test-plugin", "test-type")
+	llmdHitRatio, err := getHistogram(llmdPrefixCacheHitRatio, "test-plugin", "test-type", "test-endpoint")
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), llmdHitRatio.GetSampleCount())
 	require.Equal(t, 0.5, llmdHitRatio.GetSampleSum())
@@ -60,7 +60,7 @@ func TestRecordPrefixCacheMetrics(t *testing.T) {
 	require.Equal(t, uint64(2), hitLength.GetSampleCount())
 	require.Equal(t, float64(10), hitLength.GetSampleSum())
 
-	llmdHitLength, err := getHistogram(llmdPrefixCacheHitLength, "test-plugin", "test-type")
+	llmdHitLength, err := getHistogram(llmdPrefixCacheHitLength, "test-plugin", "test-type", "test-endpoint")
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), llmdHitLength.GetSampleCount())
 	require.Equal(t, float64(10), llmdHitLength.GetSampleSum())

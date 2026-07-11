@@ -600,9 +600,9 @@ func RecordOutputTokens(modelName, targetModelName, fairnessID, priority string,
 }
 
 // RecordPromptCachedTokens records prompt cached tokens count.
-func RecordPromptCachedTokens(modelName, targetModelName, fairnessID, priority string, size int) {
+func RecordPromptCachedTokens(modelName, targetModelName, fairnessID, priority, endpoint string, size int) {
 	promptCachedTokens.WithLabelValues(modelName, targetModelName).Observe(float64(size))
-	llmdPromptCachedTokens.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(float64(size))
+	llmdPromptCachedTokens.WithLabelValues(modelName, targetModelName, fairnessID, priority, endpoint).Observe(float64(size))
 }
 
 // RecordNormalizedTimePerOutputToken (NTPOT) records the normalized time per output token.
