@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +53,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/requestrecord"
 )
 
 // EvictChannelLookup is an optional interface for looking up eviction channels by request ID.
@@ -82,6 +84,12 @@ func (s *StreamingServer) SetEvictChannelLookup(lookup EvictChannelLookup) {
 	s.evictionLookup = lookup
 }
 
+// SetRecordSink enables the debug per-request record log. When nil (default),
+// no records are captured and the response path is unaffected.
+func (s *StreamingServer) SetRecordSink(sink *requestrecord.Sink) {
+	s.recordSink = sink
+}
+
 type Director interface {
 	HandleRequest(ctx context.Context, reqCtx *RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*RequestContext, error)
 	HandleResponseHeader(ctx context.Context, reqCtx *RequestContext) *RequestContext
@@ -99,7 +107,8 @@ type StreamingServer struct {
 	datastore         Datastore
 	director          Director
 	parserRegistry    *ParserRegistry
-	evictionLookup    EvictChannelLookup // optional, set for eviction support
+	evictionLookup    EvictChannelLookup  // optional, set for eviction support
+	recordSink        *requestrecord.Sink // optional debug per-request record sink
 	bufferPool        sync.Pool
 	maxPoolBufferSize int
 }
@@ -231,6 +240,58 @@ func extractFairnessAndPriority(reqCtx *RequestContext) (string, string) {
 	}
 	priority := strconv.Itoa(reqCtx.Priority)
 	return fairnessID, priority
+}
+
+// buildRequestRecord assembles a debug per-request record from the request
+// context and the values parked on the scheduling request during routing.
+// Called only when the record sink is enabled.
+func buildRequestRecord(reqCtx *RequestContext, fairnessID string) requestrecord.Record {
+	rec := requestrecord.Record{
+		FairnessID:     fairnessID,
+		Priority:       reqCtx.Priority,
+		IncomingModel:  reqCtx.IncomingModelName,
+		TargetModel:    reqCtx.TargetModelName,
+		TargetEndpoint: reqCtx.TargetEndpoint,
+		TSReceivedMs:   toEpochMs(reqCtx.RequestReceivedTimestamp),
+		TSFirstTokenMs: toEpochMs(reqCtx.FirstTokenTimestamp),
+		TSCompleteMs:   toEpochMs(reqCtx.ResponseCompleteTimestamp),
+		InputTokens:    reqCtx.Usage.PromptTokens,
+		OutputTokens:   reqCtx.Usage.CompletionTokens,
+	}
+	if reqCtx.Usage.PromptTokenDetails != nil {
+		rec.CachedTokens = reqCtx.Usage.PromptTokenDetails.CachedTokens
+	}
+
+	if req := reqCtx.SchedulingRequest; req != nil {
+		rec.RequestID = req.RequestID
+
+		if pm, ok := fwksched.ReadRequestAttribute[requestrecord.PrefixMatch](req, requestrecord.PrefixMatchAttrKey); ok {
+			rec.PrefixHitBlocks = pm.HitBlocks
+			rec.PrefixTotalBlocks = pm.TotalBlocks
+			rec.PrefixBlockSize = pm.BlockSize
+			if pm.TotalBlocks > 0 {
+				rec.PrefixHitRatio = float64(pm.HitBlocks) / float64(pm.TotalBlocks)
+			}
+		}
+
+		if ps, ok := fwksched.ReadRequestAttribute[map[string]requestrecord.PodDispatchState](req, requestrecord.PodStateAttrKey); ok {
+			rec.PodStateAtDispatch = ps
+			rec.TargetPods = make([]string, 0, len(ps))
+			for pod := range ps {
+				rec.TargetPods = append(rec.TargetPods, pod)
+			}
+			sort.Strings(rec.TargetPods)
+		}
+	}
+
+	return rec
+}
+
+func toEpochMs(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixMilli()
 }
 
 func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {

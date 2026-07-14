@@ -33,6 +33,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
+	"github.com/llm-d/llm-d-router/pkg/epp/requestrecord"
 )
 
 func testHandle() plugin.Handle {
@@ -146,6 +147,39 @@ func TestPreRequest(t *testing.T) {
 				assert.Contains(t, pods, ServerID(endpoint1.GetMetadata().NamespacedName))
 			}
 		}
+	})
+
+	t.Run("Parks prefix match attribute on the request", func(t *testing.T) {
+		config := config{
+			BlockSizeTokens:        1,
+			MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
+			LRUCapacityPerServer:   defaultLRUCapacityPerServer,
+		}
+		p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
+
+		endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+		req := &fwksched.InferenceRequest{
+			RequestID:   uuid.NewString(),
+			TargetModel: "test-model1",
+			Body:        tokenizedBody([]uint32{1, 2}),
+		}
+
+		_ = p.Produce(context.Background(), req, []fwksched.Endpoint{endpoint1})
+		res := &fwksched.SchedulingResult{
+			PrimaryProfileName: "default",
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
+				"default": {TargetEndpoints: []fwksched.Endpoint{endpoint1}},
+			},
+		}
+		p.PreRequest(context.Background(), req, res)
+		p.wg.Wait()
+
+		pm, ok := fwksched.ReadRequestAttribute[requestrecord.PrefixMatch](req, requestrecord.PrefixMatchAttrKey)
+		assert.True(t, ok, "prefix match attribute should be present")
+		// Empty indexer: no hit. Two single-token blocks at block size 1.
+		assert.Equal(t, 0, pm.HitBlocks)
+		assert.Equal(t, 2, pm.TotalBlocks)
+		assert.Equal(t, 1, pm.BlockSize)
 	})
 
 	t.Run("Respects LRUCapacityPerServer config", func(t *testing.T) {

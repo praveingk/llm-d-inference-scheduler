@@ -130,6 +130,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics/collectors"
 	"github.com/llm-d/llm-d-router/pkg/epp/requestcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/requestrecord"
 	"github.com/llm-d/llm-d-router/pkg/epp/scheduling"
 	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/env"
@@ -174,6 +175,7 @@ type Runner struct {
 	healthGRPCServer *grpc.Server
 	healthGRPCPort   int
 	draining         *atomic.Bool
+	recordSink       *requestrecord.Sink // debug per-request record sink, nil unless enabled
 }
 
 // WithExecutableName sets the name of the executable containing the runner.
@@ -424,6 +426,17 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		return nil, nil, err
 	}
 
+	// Debug-only per-request record log, off unless EPP_REQUEST_RECORDS is set.
+	if env.GetEnvBool("EPP_REQUEST_RECORDS", false, setupLog) {
+		capacity := env.GetEnvInt("EPP_REQUEST_RECORDS_CAPACITY", requestrecord.DefaultCapacity, setupLog)
+		r.recordSink = requestrecord.NewSink(capacity)
+		if err = requestrecord.SetupHandler(mgr, r.recordSink); err != nil {
+			setupLog.Error(err, "Failed to setup request record debug handler")
+			return nil, nil, err
+		}
+		setupLog.Info("Request record debug log enabled", "path", requestrecord.DebugPath, "capacity", capacity)
+	}
+
 	// --- Initialize Core EPP Components ---
 	if r.schedulerConfig == nil {
 		err := errors.New("scheduler config must be set either by config api or through code")
@@ -464,6 +477,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
 		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
+		RecordSink:                       r.recordSink,
 	}
 
 	if err := serverRunner.SetupWithManager(mgr); err != nil {
@@ -992,6 +1006,16 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
 	}
 
+	// Debug-only per-request record log, off unless EPP_REQUEST_RECORDS is set.
+	// File-discovery mode serves the drain endpoint from serveMetrics rather than
+	// the manager's metrics server.
+	if env.GetEnvBool("EPP_REQUEST_RECORDS", false, setupLog) {
+		capacity := env.GetEnvInt("EPP_REQUEST_RECORDS_CAPACITY", requestrecord.DefaultCapacity, setupLog)
+		r.recordSink = requestrecord.NewSink(capacity)
+		serverRunner.RecordSink = r.recordSink
+		setupLog.Info("Request record debug log enabled", "path", requestrecord.DebugPath, "capacity", capacity)
+	}
+
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))
 	metrics.Register(r.customCollectors...)
 	metrics.RecordInferenceExtensionInfo(version.CommitSHA, version.BuildRef)
@@ -1043,7 +1067,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		return runnable.NoLeaderElection(runnable.GRPCServer("health", healthSrv, opts.GRPCHealthPort)).Start(ctx)
 	})
 	g.Add("metrics", func(ctx context.Context) error {
-		return serveMetrics(ctx, opts.MetricsPort, opts.EnablePprof)
+		return serveMetrics(ctx, opts.MetricsPort, opts.EnablePprof, r.recordSink)
 	})
 	return g.Run(ctx)
 }
@@ -1058,9 +1082,12 @@ const metricsShutdownTimeout = 5 * time.Second
 // pkg/epp/metrics.Register), not the prometheus default registry. The handler
 // must serve ctrlmetrics.Registry directly; promhttp.Handler() would expose only
 // Go runtime/process metrics and silently omit every EPP metric.
-func serveMetrics(ctx context.Context, port int, enablePprof bool) error {
+func serveMetrics(ctx context.Context, port int, enablePprof bool, recordSink *requestrecord.Sink) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
+	if recordSink != nil {
+		mux.Handle(requestrecord.DebugPath, requestrecord.NewHandler(recordSink))
+	}
 	if enablePprof {
 		for path, h := range profiling.PprofHandlers() {
 			mux.Handle(path, h)

@@ -34,6 +34,15 @@ var (
 			"model_server_pod",
 		}, nil,
 	)
+
+	descInferencePoolPerEndpointRunningRequests = prometheus.NewDesc(
+		"llm_d_epp_per_endpoint_running_requests",
+		metricsutil.HelpMsgWithStability("The number of requests currently running on each underlying endpoint.", compbasemetrics.ALPHA),
+		[]string{
+			"name",
+			"model_server_endpoint",
+		}, nil,
+	)
 )
 
 type inferencePoolMetricsCollector struct {
@@ -55,6 +64,7 @@ func NewInferencePoolMetricsCollector(ds datastore.Datastore) prometheus.Collect
 func (c *inferencePoolMetricsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descInferencePoolPerPodQueueSize
 	ch <- eppmetrics.DescInferencePoolPerEndpointQueueSize
+	ch <- descInferencePoolPerEndpointRunningRequests
 }
 
 // CollectWithStability implements the prometheus.Collector interface.
@@ -81,6 +91,13 @@ func (c *inferencePoolMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 			eppmetrics.DescInferencePoolPerEndpointQueueSize,
 			prometheus.GaugeValue,
 			float64(pod.GetMetrics().WaitingQueueSize),
+			pool.Name,
+			pod.GetMetadata().NamespacedName.Name,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			descInferencePoolPerEndpointRunningRequests,
+			prometheus.GaugeValue,
+			float64(pod.GetMetrics().RunningRequestsSize),
 			pool.Name,
 			pod.GetMetadata().NamespacedName.Name,
 		)

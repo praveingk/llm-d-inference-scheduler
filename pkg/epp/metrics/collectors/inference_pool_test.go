@@ -47,6 +47,7 @@ var (
 	pod1NamespacedName = types.NamespacedName{Name: pod1.Name + "-rank-0", Namespace: pod1.Namespace}
 	pod1Metrics        = &fwkdl.Metrics{
 		WaitingQueueSize:    100,
+		RunningRequestsSize: 7,
 		KVCacheUsagePercent: 0.2,
 		MaxActiveModels:     2,
 	}
@@ -124,6 +125,15 @@ func TestMetricsCollected(t *testing.T) {
 `), "llm_d_epp_per_endpoint_queue_size")
 		if errNew != nil {
 			t.Fatal(errNew)
+		}
+
+		errRunning := promtestutil.CollectAndCompare(collector, strings.NewReader(`
+		# HELP llm_d_epp_per_endpoint_running_requests [ALPHA] The number of requests currently running on each underlying endpoint.
+		# TYPE llm_d_epp_per_endpoint_running_requests gauge
+		llm_d_epp_per_endpoint_running_requests{model_server_endpoint="pod1-rank-0",name="test-pool"} 7
+`), "llm_d_epp_per_endpoint_running_requests")
+		if errRunning != nil {
+			t.Fatal(errRunning)
 		}
 	}
 }

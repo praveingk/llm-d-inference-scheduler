@@ -52,6 +52,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/requestrecord"
 )
 
 const (
@@ -59,6 +60,11 @@ const (
 	// producer overrides it by implementing requestcontrol.TimeoutAwareProducer.
 	dataProducerTimeout       = 400 * time.Millisecond
 	responseBodyQueueCapacity = 100
+
+	// experimentalPrefillProfile is the scheduling profile that carries the
+	// prefill node in P/D disaggregated mode. Matches the approximate-prefix
+	// plugin's profile name.
+	experimentalPrefillProfile = "prefill"
 )
 
 // primaryEndpointHasCachedPrefix reports whether the primary profile's chosen
@@ -457,12 +463,34 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 	// primary profile is used to set destination
 	targetMetadatas := []*fwkdl.EndpointMetadata{}
 	targetEndpoints := []string{}
+	podState := map[string]requestrecord.PodDispatchState{}
+
+	// snapshotPodState records a pod's load at the instant it was picked, keyed
+	// by the same namespace/name the prefix and cached-token metrics use.
+	snapshotPodState := func(pod fwksched.Endpoint) {
+		if m := pod.GetMetrics(); m != nil {
+			podState[pod.GetMetadata().NamespacedName.String()] = requestrecord.PodDispatchState{
+				KVCacheUtil:     m.KVCacheUsagePercent,
+				QueueSize:       m.WaitingQueueSize,
+				RunningRequests: m.RunningRequestsSize,
+			}
+		}
+	}
 
 	for _, pod := range result.ProfileResults[result.PrimaryProfileName].TargetEndpoints {
 		curMetadata := pod.GetMetadata()
 		curEndpoint := net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort())
 		targetMetadatas = append(targetMetadatas, curMetadata)
 		targetEndpoints = append(targetEndpoints, curEndpoint)
+		snapshotPodState(pod)
+	}
+
+	// In P/D disaggregated mode the prefill node lives under a separate profile;
+	// record its dispatch state too so the request's full routing is captured.
+	if pr, exists := result.ProfileResults[experimentalPrefillProfile]; exists {
+		for _, pod := range pr.TargetEndpoints {
+			snapshotPodState(pod)
+		}
 	}
 
 	multiEndpointString := strings.Join(targetEndpoints, ",")
@@ -470,6 +498,10 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 
 	reqCtx.TargetPod = targetMetadatas[0]
 	reqCtx.TargetEndpoint = multiEndpointString
+
+	if reqCtx.SchedulingRequest != nil {
+		reqCtx.SchedulingRequest.PutAttribute(requestrecord.PodStateAttrKey, podState)
+	}
 
 	d.runPreRequestPlugins(ctx, reqCtx.SchedulingRequest, result)
 

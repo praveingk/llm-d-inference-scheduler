@@ -35,6 +35,7 @@ import (
 	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/requestrecord"
 )
 
 const (
@@ -310,6 +311,16 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 		matchLen := state.PrefixCacheServers[ServerID(namespacedName)]
 		recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, namespacedName.String(), matchLen*blockSize*averageCharactersPerToken, total*blockSize*averageCharactersPerToken)
 	}
+
+	// Park the primary target's match on the request for the debug per-request
+	// record. Same matchLen/total/blockSize the metric above is derived from,
+	// so the record and the histogram cannot disagree.
+	primaryName := targetEndpoint.GetMetadata().NamespacedName
+	request.PutAttribute(requestrecord.PrefixMatchAttrKey, requestrecord.PrefixMatch{
+		HitBlocks:   state.PrefixCacheServers[ServerID(primaryName)],
+		TotalBlocks: total,
+		BlockSize:   blockSize,
+	})
 }
 
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
