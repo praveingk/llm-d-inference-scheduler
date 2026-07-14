@@ -276,10 +276,19 @@ func buildRequestRecord(reqCtx *RequestContext, fairnessID string) requestrecord
 
 		if ps, ok := fwksched.ReadRequestAttribute[map[string]requestrecord.PodDispatchState](req, requestrecord.PodStateAttrKey); ok {
 			rec.PodStateAtDispatch = ps
-			rec.TargetPods = make([]string, 0, len(ps))
-			for pod := range ps {
-				rec.TargetPods = append(rec.TargetPods, pod)
+			// Merge the per-pod prefix match (keyed by the same namespace/name)
+			// so each candidate carries both its load and its predicted match.
+			if perPod, ok := fwksched.ReadRequestAttribute[map[string]int](req, requestrecord.PrefixPerPodAttrKey); ok {
+				for pod, blocks := range perPod {
+					s := rec.PodStateAtDispatch[pod]
+					s.PrefixMatchBlocks = blocks
+					rec.PodStateAtDispatch[pod] = s
+				}
 			}
+		}
+
+		if tp, ok := fwksched.ReadRequestAttribute[[]string](req, requestrecord.TargetPodsAttrKey); ok {
+			rec.TargetPods = append([]string(nil), tp...)
 			sort.Strings(rec.TargetPods)
 		}
 	}

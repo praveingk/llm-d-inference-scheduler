@@ -306,11 +306,17 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	}
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
 	const averageCharactersPerToken = 4
+	// perPod carries the router's predicted prefix match (in blocks) for every
+	// candidate the scheduler saw, keyed by namespace/name, so the debug record
+	// can reconstruct the scorer's per-pod affinity input.
+	perPod := make(map[string]int, len(endpoints))
 	for _, ep := range endpoints {
 		namespacedName := ep.GetMetadata().NamespacedName
 		matchLen := state.PrefixCacheServers[ServerID(namespacedName)]
+		perPod[namespacedName.String()] = matchLen
 		recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, namespacedName.String(), matchLen*blockSize*averageCharactersPerToken, total*blockSize*averageCharactersPerToken)
 	}
+	request.PutAttribute(requestrecord.PrefixPerPodAttrKey, perPod)
 
 	// Park the primary target's match on the request for the debug per-request
 	// record. Same matchLen/total/blockSize the metric above is derived from,

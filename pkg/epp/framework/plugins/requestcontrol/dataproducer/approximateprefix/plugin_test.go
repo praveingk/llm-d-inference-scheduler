@@ -180,6 +180,10 @@ func TestPreRequest(t *testing.T) {
 		assert.Equal(t, 0, pm.HitBlocks)
 		assert.Equal(t, 2, pm.TotalBlocks)
 		assert.Equal(t, 1, pm.BlockSize)
+
+		perPod, ok := fwksched.ReadRequestAttribute[map[string]int](req, requestrecord.PrefixPerPodAttrKey)
+		assert.True(t, ok, "per-pod prefix match attribute should be present")
+		assert.Equal(t, map[string]int{"default/pod1": 0}, perPod)
 	})
 
 	t.Run("Respects LRUCapacityPerServer config", func(t *testing.T) {

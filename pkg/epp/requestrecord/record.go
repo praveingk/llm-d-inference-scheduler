@@ -28,8 +28,10 @@ package requestrecord
 // end-of-stream. They are exported so the producing plugins and the consuming
 // handler agree on a single key.
 const (
-	PrefixMatchAttrKey = "requestrecord/prefix-match"
-	PodStateAttrKey    = "requestrecord/pod-state-at-dispatch"
+	PrefixMatchAttrKey  = "requestrecord/prefix-match"
+	PrefixPerPodAttrKey = "requestrecord/prefix-match-per-pod"
+	PodStateAttrKey     = "requestrecord/pod-state-at-dispatch"
+	TargetPodsAttrKey   = "requestrecord/target-pods"
 )
 
 // PrefixMatch is the router-side prefix-cache prediction for a request's
@@ -41,11 +43,15 @@ type PrefixMatch struct {
 	BlockSize   int `json:"block_size"`
 }
 
-// PodDispatchState is a pod's load at the moment it was chosen for a request.
+// PodDispatchState is a candidate pod's load at the moment the request was
+// scheduled, plus the router's predicted prefix match for that pod. Recorded
+// for every candidate the scheduler considered, not only the winner, so the
+// scorer's ranking can be reconstructed offline.
 type PodDispatchState struct {
-	KVCacheUtil     float64 `json:"kv_util"`
-	QueueSize       int     `json:"queue_size"`
-	RunningRequests int     `json:"running_requests"`
+	KVCacheUtil       float64 `json:"kv_util"`
+	QueueSize         int     `json:"queue_size"`
+	RunningRequests   int     `json:"running_requests"`
+	PrefixMatchBlocks int     `json:"prefix_match_blocks"`
 }
 
 // Record is one completed request's raw observation. All values are exact as
@@ -59,7 +65,8 @@ type Record struct {
 	TargetEndpoint string `json:"target_endpoint"`
 
 	// TargetPods lists the pods (namespace/name) the request was routed to:
-	// the decode primary plus the prefill node in P/D mode.
+	// the decode primary plus the prefill node in P/D mode. These are the
+	// winners among the candidates in PodStateAtDispatch.
 	TargetPods []string `json:"target_pods"`
 
 	TSReceivedMs   int64 `json:"ts_received_ms"`
@@ -75,7 +82,7 @@ type Record struct {
 	PrefixBlockSize   int     `json:"prefix_block_size"`
 	PrefixHitRatio    float64 `json:"prefix_hit_ratio"`
 
-	// PodStateAtDispatch maps target pod (namespace/name) to its load snapshot
-	// when it was picked.
+	// PodStateAtDispatch maps every candidate pod (namespace/name) the scheduler
+	// considered to its load snapshot and predicted prefix match at dispatch.
 	PodStateAtDispatch map[string]PodDispatchState `json:"pod_state_at_dispatch,omitempty"`
 }
