@@ -306,15 +306,21 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	}
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
 	const averageCharactersPerToken = 4
-	// perPod carries the router's predicted prefix match (in blocks) for every
-	// candidate the scheduler saw, keyed by namespace/name, so the debug record
-	// can reconstruct the scorer's per-pod affinity input.
-	perPod := make(map[string]int, len(endpoints))
 	for _, ep := range endpoints {
 		namespacedName := ep.GetMetadata().NamespacedName
 		matchLen := state.PrefixCacheServers[ServerID(namespacedName)]
-		perPod[namespacedName.String()] = matchLen
 		recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, namespacedName.String(), matchLen*blockSize*averageCharactersPerToken, total*blockSize*averageCharactersPerToken)
+	}
+
+	// Park the predicted match (in blocks) for every candidate the scheduler
+	// scored, keyed by namespace/name, so the debug record can reconstruct the
+	// scorer's per-pod affinity input. PrefixCacheServers is the same map the
+	// scorer's per-pod PrefixCacheMatchInfo derives from (both set in Produce),
+	// so this covers all candidates, not just the routed winner. Candidates with
+	// no match are absent here and default to 0 blocks in the record.
+	perPod := make(map[string]int, len(state.PrefixCacheServers))
+	for server, matchLen := range state.PrefixCacheServers {
+		perPod[server.String()] = matchLen
 	}
 	request.PutAttribute(requestrecord.PrefixPerPodAttrKey, perPod)
 

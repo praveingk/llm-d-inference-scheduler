@@ -308,17 +308,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	// scheduler-facing metrics are frozen in this snapshot, so this captures the
 	// fleet exactly as the scorers saw it, not just the pods that win.
 	if reqCtx.SchedulingRequest != nil {
-		podState := make(map[string]requestrecord.PodDispatchState, len(snapshotOfCandidatePods))
-		for _, pod := range snapshotOfCandidatePods {
-			if m := pod.GetMetrics(); m != nil {
-				podState[pod.GetMetadata().NamespacedName.String()] = requestrecord.PodDispatchState{
-					KVCacheUtil:     m.KVCacheUsagePercent,
-					QueueSize:       m.WaitingQueueSize,
-					RunningRequests: m.RunningRequestsSize,
-				}
-			}
-		}
-		reqCtx.SchedulingRequest.PutAttribute(requestrecord.PodStateAttrKey, podState)
+		reqCtx.SchedulingRequest.PutAttribute(requestrecord.PodStateAttrKey, candidatePodState(snapshotOfCandidatePods))
 	}
 
 	// Prepare per request data by running DataProducer plugins.
@@ -512,6 +502,23 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 	d.runPreRequestPlugins(ctx, reqCtx.SchedulingRequest, result)
 
 	return reqCtx, nil
+}
+
+// candidatePodState snapshots each candidate pod's load, keyed by the same
+// namespace/name the prefix and cached-token metrics use, for the debug
+// per-request record. Pods without metrics are skipped.
+func candidatePodState(candidates []fwksched.Endpoint) map[string]requestrecord.PodDispatchState {
+	podState := make(map[string]requestrecord.PodDispatchState, len(candidates))
+	for _, pod := range candidates {
+		if m := pod.GetMetrics(); m != nil {
+			podState[pod.GetMetadata().NamespacedName.String()] = requestrecord.PodDispatchState{
+				KVCacheUtil:     m.KVCacheUsagePercent,
+				QueueSize:       m.WaitingQueueSize,
+				RunningRequests: m.RunningRequestsSize,
+			}
+		}
+	}
+	return podState
 }
 
 func (d *Director) toSchedulerEndpoints(endpoints []fwkdl.Endpoint) []fwksched.Endpoint {

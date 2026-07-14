@@ -183,7 +183,48 @@ func TestPreRequest(t *testing.T) {
 
 		perPod, ok := fwksched.ReadRequestAttribute[map[string]int](req, requestrecord.PrefixPerPodAttrKey)
 		assert.True(t, ok, "per-pod prefix match attribute should be present")
-		assert.Equal(t, map[string]int{"default/pod1": 0}, perPod)
+		// Empty indexer: no pod has a match, so the per-pod map is empty. Pods
+		// absent here default to 0 blocks when merged into the record.
+		assert.Empty(t, perPod)
+	})
+
+	t.Run("Per-pod prefix match covers all matched candidates, not just the winner", func(t *testing.T) {
+		config := config{
+			BlockSizeTokens:        1,
+			MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
+			LRUCapacityPerServer:   defaultLRUCapacityPerServer,
+		}
+		p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
+
+		// Two candidates. Warm the indexer for pod2 (the eventual non-winner) so
+		// it holds the request's prefix, then route the request to pod1.
+		pod1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+		pod2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod2", Namespace: "default"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+		endpoints := []fwksched.Endpoint{pod1, pod2}
+
+		warm := &fwksched.InferenceRequest{RequestID: uuid.NewString(), TargetModel: "test-model1", Body: tokenizedBody([]uint32{1, 2})}
+		_ = p.Produce(context.Background(), warm, endpoints)
+		warmRes := &fwksched.SchedulingResult{
+			PrimaryProfileName: "default",
+			ProfileResults:     map[string]*fwksched.ProfileRunResult{"default": {TargetEndpoints: []fwksched.Endpoint{pod2}}},
+		}
+		p.PreRequest(context.Background(), warm, warmRes)
+		p.wg.Wait()
+
+		// Same prefix again, this time routed to pod1. pod2 (a non-winner) should
+		// still show its predicted match in the per-pod map.
+		req := &fwksched.InferenceRequest{RequestID: uuid.NewString(), TargetModel: "test-model1", Body: tokenizedBody([]uint32{1, 2})}
+		_ = p.Produce(context.Background(), req, endpoints)
+		res := &fwksched.SchedulingResult{
+			PrimaryProfileName: "default",
+			ProfileResults:     map[string]*fwksched.ProfileRunResult{"default": {TargetEndpoints: []fwksched.Endpoint{pod1}}},
+		}
+		p.PreRequest(context.Background(), req, res)
+		p.wg.Wait()
+
+		perPod, ok := fwksched.ReadRequestAttribute[map[string]int](req, requestrecord.PrefixPerPodAttrKey)
+		assert.True(t, ok, "per-pod prefix match attribute should be present")
+		assert.Positive(t, perPod["default/pod2"], "non-winner pod2's predicted match must be recorded")
 	})
 
 	t.Run("Respects LRUCapacityPerServer config", func(t *testing.T) {

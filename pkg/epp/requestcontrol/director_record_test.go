@@ -40,6 +40,35 @@ func endpoint(name string) fwksched.Endpoint {
 	)
 }
 
+func endpointWithMetrics(name string, m *fwkdl.Metrics) fwksched.Endpoint {
+	return fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			Address:        "192.168.1.100",
+			Port:           "8000",
+			NamespacedName: types.NamespacedName{Name: name, Namespace: "default"},
+		},
+		m,
+		fwkdl.NewAttributes(),
+	)
+}
+
+// TestCandidatePodState verifies the debug snapshot captures every candidate,
+// not only the routed winners, keyed by namespace/name with its load intact.
+func TestCandidatePodState(t *testing.T) {
+	candidates := []fwksched.Endpoint{
+		endpointWithMetrics("pod1", &fwkdl.Metrics{KVCacheUsagePercent: 0.42, WaitingQueueSize: 5, RunningRequestsSize: 3}),
+		endpointWithMetrics("pod2", &fwkdl.Metrics{KVCacheUsagePercent: 0.10, WaitingQueueSize: 0, RunningRequestsSize: 1}),
+		endpointWithMetrics("pod3", &fwkdl.Metrics{KVCacheUsagePercent: 0.90, WaitingQueueSize: 9, RunningRequestsSize: 7}),
+	}
+
+	ps := candidatePodState(candidates)
+
+	assert.Len(t, ps, 3, "all candidates should be captured, not just winners")
+	assert.Equal(t, requestrecord.PodDispatchState{KVCacheUtil: 0.42, QueueSize: 5, RunningRequests: 3}, ps["default/pod1"])
+	assert.Equal(t, requestrecord.PodDispatchState{KVCacheUtil: 0.10, QueueSize: 0, RunningRequests: 1}, ps["default/pod2"])
+	assert.Equal(t, requestrecord.PodDispatchState{KVCacheUtil: 0.90, QueueSize: 9, RunningRequests: 7}, ps["default/pod3"])
+}
+
 // TestPrepareRequest_ParksTargetPods verifies prepareRequest records the routed
 // winners (decode primary plus the P/D prefill node) on the scheduling request,
 // keyed by namespace/name. The full-candidate pod state is captured upstream in
