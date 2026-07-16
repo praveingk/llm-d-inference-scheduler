@@ -26,8 +26,8 @@ import (
 )
 
 // TestBuildRequestRecord_MergesCandidatesPrefixAndTargets verifies the record
-// carries every candidate's load, overlays each candidate's predicted prefix
-// match by namespace/name, and flags the routed winners separately.
+// carries every candidate's load, records each prefix producer's per-pod
+// prediction under its own producer name, and flags the routed winners.
 func TestBuildRequestRecord_MergesCandidatesPrefixAndTargets(t *testing.T) {
 	req := &fwksched.InferenceRequest{RequestID: "r1"}
 
@@ -37,10 +37,20 @@ func TestBuildRequestRecord_MergesCandidatesPrefixAndTargets(t *testing.T) {
 		"default/pod2": {KVCacheUtil: 0.1, QueueSize: 0, RunningRequests: 1},
 		"default/pod3": {KVCacheUtil: 0.9, QueueSize: 7, RunningRequests: 5},
 	})
-	// A non-winner (pod2) has the largest predicted prefix match; pod3 has none.
-	req.PutAttribute(requestrecord.PrefixPerPodAttrKey, map[string]int{
-		"default/pod1": 1,
-		"default/pod2": 4,
+	// Two prefix producers, each parking under its own scoped key. A non-winner
+	// (pod2) has the largest approximate match; pod3 has none.
+	req.PutAttribute(requestrecord.PrefixPerPodAttrKey("approx-prefix-scorer"), map[string]requestrecord.PrefixPodMatch{
+		"default/pod1": {MatchBlocks: 1, CachedBlockCount: 1},
+		"default/pod2": {MatchBlocks: 4, CachedBlockCount: 4},
+	})
+	req.PutAttribute(requestrecord.PrefixPrimaryAttrKey("approx-prefix-scorer"), requestrecord.PrefixMatch{
+		HitBlocks: 1, TotalBlocks: 4, BlockSize: 64,
+	})
+	req.PutAttribute(requestrecord.PrefixPerPodAttrKey("precise-prefix-cache-producer"), map[string]requestrecord.PrefixPodMatch{
+		"default/pod1": {MatchBlocks: 2, CachedBlockCount: 3},
+	})
+	req.PutAttribute(requestrecord.PrefixPrimaryAttrKey("precise-prefix-cache-producer"), requestrecord.PrefixMatch{
+		HitBlocks: 2, TotalBlocks: 4, BlockSize: 64,
 	})
 	req.PutAttribute(requestrecord.TargetPodsAttrKey, []string{"default/pod1"})
 
@@ -55,11 +65,18 @@ func TestBuildRequestRecord_MergesCandidatesPrefixAndTargets(t *testing.T) {
 	assert.Len(t, rec.PodStateAtDispatch, 3)
 	assert.Equal(t, 0.9, rec.PodStateAtDispatch["default/pod3"].KVCacheUtil)
 
-	// Prefix blocks overlaid per candidate, including the non-winner pod2.
-	assert.Equal(t, 1, rec.PodStateAtDispatch["default/pod1"].PrefixMatchBlocks)
-	assert.Equal(t, 4, rec.PodStateAtDispatch["default/pod2"].PrefixMatchBlocks)
-	// A candidate with no predicted match stays at zero.
-	assert.Equal(t, 0, rec.PodStateAtDispatch["default/pod3"].PrefixMatchBlocks)
+	// Both producers recorded, keyed by producer name, without collision.
+	assert.Len(t, rec.Prefix, 2)
+	approx := rec.Prefix["approx-prefix-scorer"]
+	assert.Equal(t, 1, approx.PerPod["default/pod1"].MatchBlocks)
+	assert.Equal(t, 4, approx.PerPod["default/pod2"].MatchBlocks)
+	// A candidate with no predicted match is absent (zero value on lookup).
+	assert.Equal(t, 0, approx.PerPod["default/pod3"].MatchBlocks)
+	assert.Equal(t, 0.25, approx.Primary.HitRatio)
+
+	precise := rec.Prefix["precise-prefix-cache-producer"]
+	assert.Equal(t, 2, precise.PerPod["default/pod1"].MatchBlocks)
+	assert.Equal(t, 3, precise.PerPod["default/pod1"].CachedBlockCount)
 
 	// Only the routed winner is a target.
 	assert.Equal(t, []string{"default/pod1"}, rec.TargetPods)

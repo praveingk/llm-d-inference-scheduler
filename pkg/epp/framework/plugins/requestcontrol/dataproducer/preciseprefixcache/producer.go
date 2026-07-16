@@ -41,6 +41,7 @@ import (
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	rcplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/requestrecord"
 )
 
 // PluginType is the registered type name of the precise-prefix-cache-producer.
@@ -286,6 +287,7 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 	}
 
 	maxMatch := 0
+	perPod := make(map[string]requestrecord.PrefixPodMatch, len(endpoints))
 	for _, ep := range endpoints {
 		md := ep.GetMetadata()
 		if md == nil {
@@ -302,7 +304,18 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		}
 		ep.Put(p.dk.String(),
 			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).WithCachedBlockCount(cachedBlocks))
+		// Key the debug-record snapshot by namespace/name to align with
+		// PodStateAtDispatch and the approximate producer's per-pod map.
+		perPod[md.NamespacedName.String()] = requestrecord.PrefixPodMatch{
+			MatchBlocks: matchLen, CachedBlockCount: cachedBlocks,
+		}
 	}
+
+	// Snapshot the per-candidate match for the debug per-request record,
+	// unconditionally (independent of speculative indexing). PreRequest reads
+	// this to park the record attributes once the routing winner is known.
+	p.pluginState.Write(request.RequestID, recordStateKey,
+		&recordState{perPod: perPod, totalBlocks: totalBlocks, blockSize: p.blockSizeTokens})
 
 	if p.speculativeEnabled {
 		p.pluginState.Write(request.RequestID, blockKeysStateKey,

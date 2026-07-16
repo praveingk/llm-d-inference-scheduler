@@ -317,18 +317,21 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	// scorer's per-pod affinity input. PrefixCacheServers is the same map the
 	// scorer's per-pod PrefixCacheMatchInfo derives from (both set in Produce),
 	// so this covers all candidates, not just the routed winner. Candidates with
-	// no match are absent here and default to 0 blocks in the record.
-	perPod := make(map[string]int, len(state.PrefixCacheServers))
+	// no match are absent here and default to 0 blocks in the record. The
+	// approximate producer has no tier weighting, so CachedBlockCount == MatchBlocks.
+	// Keys are producer-scoped by this plugin's instance name so a second prefix
+	// producer (e.g. precise) parks alongside rather than overwriting.
+	perPod := make(map[string]requestrecord.PrefixPodMatch, len(state.PrefixCacheServers))
 	for server, matchLen := range state.PrefixCacheServers {
-		perPod[server.String()] = matchLen
+		perPod[server.String()] = requestrecord.PrefixPodMatch{MatchBlocks: matchLen, CachedBlockCount: matchLen}
 	}
-	request.PutAttribute(requestrecord.PrefixPerPodAttrKey, perPod)
+	request.PutAttribute(requestrecord.PrefixPerPodAttrKey(p.typedName.Name), perPod)
 
 	// Park the primary target's match on the request for the debug per-request
 	// record. Same matchLen/total/blockSize the metric above is derived from,
 	// so the record and the histogram cannot disagree.
 	primaryName := targetEndpoint.GetMetadata().NamespacedName
-	request.PutAttribute(requestrecord.PrefixMatchAttrKey, requestrecord.PrefixMatch{
+	request.PutAttribute(requestrecord.PrefixPrimaryAttrKey(p.typedName.Name), requestrecord.PrefixMatch{
 		HitBlocks:   state.PrefixCacheServers[ServerID(primaryName)],
 		TotalBlocks: total,
 		BlockSize:   blockSize,

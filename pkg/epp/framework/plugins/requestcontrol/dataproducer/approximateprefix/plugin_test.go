@@ -174,14 +174,14 @@ func TestPreRequest(t *testing.T) {
 		p.PreRequest(context.Background(), req, res)
 		p.wg.Wait()
 
-		pm, ok := fwksched.ReadRequestAttribute[requestrecord.PrefixMatch](req, requestrecord.PrefixMatchAttrKey)
+		pm, ok := fwksched.ReadRequestAttribute[requestrecord.PrefixMatch](req, requestrecord.PrefixPrimaryAttrKey(ApproxPrefixCachePluginType))
 		assert.True(t, ok, "prefix match attribute should be present")
 		// Empty indexer: no hit. Two single-token blocks at block size 1.
 		assert.Equal(t, 0, pm.HitBlocks)
 		assert.Equal(t, 2, pm.TotalBlocks)
 		assert.Equal(t, 1, pm.BlockSize)
 
-		perPod, ok := fwksched.ReadRequestAttribute[map[string]int](req, requestrecord.PrefixPerPodAttrKey)
+		perPod, ok := fwksched.ReadRequestAttribute[map[string]requestrecord.PrefixPodMatch](req, requestrecord.PrefixPerPodAttrKey(ApproxPrefixCachePluginType))
 		assert.True(t, ok, "per-pod prefix match attribute should be present")
 		// Empty indexer: no pod has a match, so the per-pod map is empty. Pods
 		// absent here default to 0 blocks when merged into the record.
@@ -222,9 +222,9 @@ func TestPreRequest(t *testing.T) {
 		p.PreRequest(context.Background(), req, res)
 		p.wg.Wait()
 
-		perPod, ok := fwksched.ReadRequestAttribute[map[string]int](req, requestrecord.PrefixPerPodAttrKey)
+		perPod, ok := fwksched.ReadRequestAttribute[map[string]requestrecord.PrefixPodMatch](req, requestrecord.PrefixPerPodAttrKey(ApproxPrefixCachePluginType))
 		assert.True(t, ok, "per-pod prefix match attribute should be present")
-		assert.Positive(t, perPod["default/pod2"], "non-winner pod2's predicted match must be recorded")
+		assert.Positive(t, perPod["default/pod2"].MatchBlocks, "non-winner pod2's predicted match must be recorded")
 	})
 
 	t.Run("Respects LRUCapacityPerServer config", func(t *testing.T) {

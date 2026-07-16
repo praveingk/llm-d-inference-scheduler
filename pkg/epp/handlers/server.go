@@ -126,6 +126,7 @@ type RequestContext struct {
 	ObjectiveKey               string
 	Priority                   int
 	RequestReceivedTimestamp   time.Time
+	DispatchedTimestamp        time.Time
 	FirstTokenTimestamp        time.Time
 	ResponseCompleteTimestamp  time.Time
 	LastChunkReceivedTimestamp time.Time
@@ -253,6 +254,7 @@ func buildRequestRecord(reqCtx *RequestContext, fairnessID string) requestrecord
 		TargetModel:    reqCtx.TargetModelName,
 		TargetEndpoint: reqCtx.TargetEndpoint,
 		TSReceivedMs:   toEpochMs(reqCtx.RequestReceivedTimestamp),
+		TSDispatchedMs: toEpochMs(reqCtx.DispatchedTimestamp),
 		TSFirstTokenMs: toEpochMs(reqCtx.FirstTokenTimestamp),
 		TSCompleteMs:   toEpochMs(reqCtx.ResponseCompleteTimestamp),
 		InputTokens:    reqCtx.Usage.PromptTokens,
@@ -264,27 +266,10 @@ func buildRequestRecord(reqCtx *RequestContext, fairnessID string) requestrecord
 
 	if req := reqCtx.SchedulingRequest; req != nil {
 		rec.RequestID = req.RequestID
-
-		if pm, ok := fwksched.ReadRequestAttribute[requestrecord.PrefixMatch](req, requestrecord.PrefixMatchAttrKey); ok {
-			rec.PrefixHitBlocks = pm.HitBlocks
-			rec.PrefixTotalBlocks = pm.TotalBlocks
-			rec.PrefixBlockSize = pm.BlockSize
-			if pm.TotalBlocks > 0 {
-				rec.PrefixHitRatio = float64(pm.HitBlocks) / float64(pm.TotalBlocks)
-			}
-		}
+		rec.Prefix = readPrefixSources(req)
 
 		if ps, ok := fwksched.ReadRequestAttribute[map[string]requestrecord.PodDispatchState](req, requestrecord.PodStateAttrKey); ok {
 			rec.PodStateAtDispatch = ps
-			// Merge the per-pod prefix match (keyed by the same namespace/name)
-			// so each candidate carries both its load and its predicted match.
-			if perPod, ok := fwksched.ReadRequestAttribute[map[string]int](req, requestrecord.PrefixPerPodAttrKey); ok {
-				for pod, blocks := range perPod {
-					s := rec.PodStateAtDispatch[pod]
-					s.PrefixMatchBlocks = blocks
-					rec.PodStateAtDispatch[pod] = s
-				}
-			}
 		}
 
 		if tp, ok := fwksched.ReadRequestAttribute[[]string](req, requestrecord.TargetPodsAttrKey); ok {
@@ -294,6 +279,37 @@ func buildRequestRecord(reqCtx *RequestContext, fairnessID string) requestrecord
 	}
 
 	return rec
+}
+
+// readPrefixSources gathers every prefix producer's prediction parked on the
+// request, keyed by producer name. Producers park under producer-scoped keys
+// (PrefixPrimaryAttrKey / PrefixPerPodAttrKey), so multiple prefix producers
+// (e.g. approximate and precise) do not overwrite one another. Returns nil when
+// no producer parked anything.
+func readPrefixSources(req *fwksched.InferenceRequest) map[string]requestrecord.PrefixSource {
+	var sources map[string]requestrecord.PrefixSource
+	for _, key := range req.AttributeKeys() {
+		name, ok := strings.CutPrefix(key, requestrecord.PrefixPrimaryAttrPrefix)
+		if !ok {
+			continue
+		}
+		pm, ok := fwksched.ReadRequestAttribute[requestrecord.PrefixMatch](req, key)
+		if !ok {
+			continue
+		}
+		if pm.TotalBlocks > 0 {
+			pm.HitRatio = float64(pm.HitBlocks) / float64(pm.TotalBlocks)
+		}
+		src := requestrecord.PrefixSource{Primary: pm}
+		if perPod, ok := fwksched.ReadRequestAttribute[map[string]requestrecord.PrefixPodMatch](req, requestrecord.PrefixPerPodAttrKey(name)); ok {
+			src.PerPod = perPod
+		}
+		if sources == nil {
+			sources = make(map[string]requestrecord.PrefixSource)
+		}
+		sources[name] = src
+	}
+	return sources
 }
 
 func toEpochMs(t time.Time) int64 {
@@ -509,6 +525,9 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					logger.Error(err, "Error handling request")
 					break
 				}
+				// Scheduling succeeded: the pod is picked and the request is about to
+				// be released upstream. This is the only EPP-observable "dispatch" instant.
+				reqCtx.DispatchedTimestamp = time.Now()
 
 				// After scheduling, look up the eviction channel for eviction support.
 				// Setting evictCh from nil to a real channel dynamically enables the

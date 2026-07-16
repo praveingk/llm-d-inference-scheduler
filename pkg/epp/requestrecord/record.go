@@ -23,35 +23,71 @@ limitations under the License.
 // production guarantees.
 package requestrecord
 
-// PrefixMatchAttrKey and PodStateAttrKey name the values parked on an
+// PodStateAttrKey and TargetPodsAttrKey name the values parked on an
 // InferenceRequest during scheduling for the response handler to read at
-// end-of-stream. They are exported so the producing plugins and the consuming
+// end-of-stream. They are exported so the producing code and the consuming
 // handler agree on a single key.
 const (
-	PrefixMatchAttrKey  = "requestrecord/prefix-match"
-	PrefixPerPodAttrKey = "requestrecord/prefix-match-per-pod"
-	PodStateAttrKey     = "requestrecord/pod-state-at-dispatch"
-	TargetPodsAttrKey   = "requestrecord/target-pods"
+	PodStateAttrKey   = "requestrecord/pod-state-at-dispatch"
+	TargetPodsAttrKey = "requestrecord/target-pods"
+
+	// prefixAttrPrefix scopes prefix-match parking by producer name so multiple
+	// prefix producers (e.g. approximate and precise) each write their own
+	// prediction without overwriting one another.
+	prefixPrimaryAttrPrefix = "requestrecord/prefix-primary/"
+	prefixPerPodAttrPrefix  = "requestrecord/prefix-per-pod/"
 )
 
-// PrefixMatch is the router-side prefix-cache prediction for a request's
-// primary target, captured when the approximate-prefix plugin scores the
-// selection. Lengths are in blocks; multiply by BlockSize for tokens.
+// PrefixPrimaryAttrKey returns the per-request attribute key under which a
+// prefix producer parks its primary-target PrefixMatch, scoped by producer name.
+func PrefixPrimaryAttrKey(producerName string) string {
+	return prefixPrimaryAttrPrefix + producerName
+}
+
+// PrefixPerPodAttrKey returns the per-request attribute key under which a prefix
+// producer parks its per-candidate PrefixPodMatch map, scoped by producer name.
+func PrefixPerPodAttrKey(producerName string) string {
+	return prefixPerPodAttrPrefix + producerName
+}
+
+// PrefixPrimaryAttrPrefix is the shared prefix of every producer-scoped
+// primary-match key, so the handler can enumerate parked producers.
+const PrefixPrimaryAttrPrefix = prefixPrimaryAttrPrefix
+
+// PrefixMatch is a prefix producer's prediction for a request's primary target.
+// Lengths are in blocks; multiply by BlockSize for tokens.
 type PrefixMatch struct {
-	HitBlocks   int `json:"hit_blocks"`
-	TotalBlocks int `json:"total_blocks"`
-	BlockSize   int `json:"block_size"`
+	HitBlocks   int     `json:"hit_blocks"`
+	TotalBlocks int     `json:"total_blocks"`
+	BlockSize   int     `json:"block_size"`
+	HitRatio    float64 `json:"hit_ratio"`
+}
+
+// PrefixPodMatch is one candidate pod's predicted prefix match from a single
+// producer. MatchBlocks is the value the scorer ranked on (tier-weighted for
+// the precise producer); CachedBlockCount is the literal contiguous cached
+// block count (equal to MatchBlocks for the approximate producer).
+type PrefixPodMatch struct {
+	MatchBlocks      int `json:"match_blocks"`
+	CachedBlockCount int `json:"cached_block_count"`
+}
+
+// PrefixSource is one prefix producer's full prediction for a request: the
+// primary-target match plus the per-candidate match map, keyed by producer name
+// in Record.Prefix.
+type PrefixSource struct {
+	Primary PrefixMatch               `json:"primary"`
+	PerPod  map[string]PrefixPodMatch `json:"per_pod,omitempty"`
 }
 
 // PodDispatchState is a candidate pod's load at the moment the request was
-// scheduled, plus the router's predicted prefix match for that pod. Recorded
-// for every candidate the scheduler considered, not only the winner, so the
-// scorer's ranking can be reconstructed offline.
+// scheduled. Recorded for every candidate the scheduler considered, not only
+// the winner, so the scorer's ranking can be reconstructed offline. Per-pod
+// prefix predictions live under Record.Prefix, attributed per producer.
 type PodDispatchState struct {
-	KVCacheUtil       float64 `json:"kv_util"`
-	QueueSize         int     `json:"queue_size"`
-	RunningRequests   int     `json:"running_requests"`
-	PrefixMatchBlocks int     `json:"prefix_match_blocks"`
+	KVCacheUtil     float64 `json:"kv_util"`
+	QueueSize       int     `json:"queue_size"`
+	RunningRequests int     `json:"running_requests"`
 }
 
 // Record is one completed request's raw observation. All values are exact as
@@ -70,6 +106,7 @@ type Record struct {
 	TargetPods []string `json:"target_pods"`
 
 	TSReceivedMs   int64 `json:"ts_received_ms"`
+	TSDispatchedMs int64 `json:"ts_dispatched_ms"`
 	TSFirstTokenMs int64 `json:"ts_first_token_ms"`
 	TSCompleteMs   int64 `json:"ts_complete_ms"`
 
@@ -77,12 +114,12 @@ type Record struct {
 	OutputTokens int `json:"output_tokens"`
 	CachedTokens int `json:"cached_tokens"`
 
-	PrefixHitBlocks   int     `json:"prefix_hit_blocks"`
-	PrefixTotalBlocks int     `json:"prefix_total_blocks"`
-	PrefixBlockSize   int     `json:"prefix_block_size"`
-	PrefixHitRatio    float64 `json:"prefix_hit_ratio"`
+	// Prefix maps each prefix producer's instance name to its prediction for
+	// this request. Multiple producers (e.g. approximate and precise) each
+	// contribute one entry; empty when no prefix producer ran.
+	Prefix map[string]PrefixSource `json:"prefix,omitempty"`
 
 	// PodStateAtDispatch maps every candidate pod (namespace/name) the scheduler
-	// considered to its load snapshot and predicted prefix match at dispatch.
+	// considered to its load snapshot at dispatch.
 	PodStateAtDispatch map[string]PodDispatchState `json:"pod_state_at_dispatch,omitempty"`
 }

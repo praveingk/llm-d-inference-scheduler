@@ -29,13 +29,34 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/requestrecord"
 )
 
 const (
 	defaultSpeculativeTTL      = 2 * time.Second
 	experimentalPrefillProfile = "prefill"
 	blockKeysStateKey          = plugin.StateKey("precise-prefix-cache-producer.block-keys")
+	recordStateKey             = plugin.StateKey("precise-prefix-cache-producer.record")
 )
+
+// recordState carries the per-candidate prefix match computed in Produce to
+// PreRequest for the debug per-request record. Written unconditionally (not
+// gated on speculative indexing) so the record captures precise per-pod data
+// regardless of the speculative setting.
+type recordState struct {
+	perPod      map[string]requestrecord.PrefixPodMatch
+	totalBlocks int
+	blockSize   int
+}
+
+// Clone implements plugin.StateData.
+func (s *recordState) Clone() plugin.StateData {
+	cp := make(map[string]requestrecord.PrefixPodMatch, len(s.perPod))
+	for k, v := range s.perPod {
+		cp[k] = v
+	}
+	return &recordState{perPod: cp, totalBlocks: s.totalBlocks, blockSize: s.blockSize}
+}
 
 var _ requestcontrol.PreRequest = &Producer{}
 
@@ -111,14 +132,20 @@ func buildSpeculativeCache(ctx context.Context, config PluginConfig,
 	return cache, ttl, nil
 }
 
-// PreRequest seeds speculative KV-block index entries for the endpoint(s)
+// PreRequest parks this producer's per-request prefix prediction for the debug
+// record, then seeds speculative KV-block index entries for the endpoint(s)
 // selected by the scheduler, so the next same-prefix request hits without
 // waiting for confirmed KV-events from the engine. Entries are tracked in
-// a TTL cache and evicted automatically. No-op when speculativeIndexing
-// is disabled.
+// a TTL cache and evicted automatically. Speculative indexing is a no-op when
+// disabled; the record parking always runs.
 func (p *Producer) PreRequest(ctx context.Context,
 	request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult,
 ) {
+	// Park the debug-record prefix prediction first, independent of the
+	// speculative guard below, so the per-request record captures precise
+	// per-pod data even when speculative indexing is disabled.
+	p.parseRecordState(request, schedulingResult)
+
 	if !p.speculativeEnabled {
 		return
 	}
@@ -197,4 +224,34 @@ func (p *Producer) PreRequest(ctx context.Context,
 		"pod", speculativePod.PodIdentifier,
 		"prompts", len(state.perPromptKeys),
 		"ttl", p.speculativeTTL)
+}
+
+// parseRecordState reads the per-candidate match snapshot saved in Produce and
+// parks the debug per-request record attributes (producer-scoped by this
+// instance's name), selecting the primary target from the scheduling result.
+// No-op when Produce saved nothing (e.g. a tokenless request).
+func (p *Producer) parseRecordState(request *scheduling.InferenceRequest,
+	schedulingResult *scheduling.SchedulingResult,
+) {
+	state, err := plugin.ReadPluginStateKey[*recordState](
+		p.pluginState, request.RequestID, recordStateKey)
+	if err != nil {
+		return
+	}
+	// Delete only the record key; the speculative path still needs blockKeysState.
+	p.pluginState.DeleteKey(request.RequestID, recordStateKey)
+
+	request.PutAttribute(requestrecord.PrefixPerPodAttrKey(p.typedName.Name), state.perPod)
+
+	primary := requestrecord.PrefixMatch{TotalBlocks: state.totalBlocks, BlockSize: state.blockSize}
+	if schedulingResult != nil {
+		if pr := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]; pr != nil && len(pr.TargetEndpoints) > 0 {
+			if md := pr.TargetEndpoints[0].GetMetadata(); md != nil {
+				if m, ok := state.perPod[md.NamespacedName.String()]; ok {
+					primary.HitBlocks = m.MatchBlocks
+				}
+			}
+		}
+	}
+	request.PutAttribute(requestrecord.PrefixPrimaryAttrKey(p.typedName.Name), primary)
 }
