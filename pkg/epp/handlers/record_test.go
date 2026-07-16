@@ -37,13 +37,16 @@ func TestBuildRequestRecord_MergesCandidatesPrefixAndTargets(t *testing.T) {
 		"default/pod2": {KVCacheUtil: 0.1, QueueSize: 0, RunningRequests: 1},
 		"default/pod3": {KVCacheUtil: 0.9, QueueSize: 7, RunningRequests: 5},
 	})
-	// Two prefix producers, each parking under its own scoped key. A non-winner
-	// (pod2) has the largest approximate match; pod3 has none.
-	req.PutAttribute(requestrecord.PrefixPerPodAttrKey("approx-prefix-scorer"), map[string]requestrecord.PrefixPodMatch{
+	// Two prefix producers, each parking under its own scoped key. The names are
+	// the producers' runtime instance names: the approximate producer is
+	// auto-injected as the default producer, so its name is its type
+	// "approx-prefix-cache-producer" (not the scorer that consumes its data). A
+	// non-winner (pod2) has the largest approximate match; pod3 has none.
+	req.PutAttribute(requestrecord.PrefixPerPodAttrKey("approx-prefix-cache-producer"), map[string]requestrecord.PrefixPodMatch{
 		"default/pod1": {MatchBlocks: 1, CachedBlockCount: 1},
 		"default/pod2": {MatchBlocks: 4, CachedBlockCount: 4},
 	})
-	req.PutAttribute(requestrecord.PrefixPrimaryAttrKey("approx-prefix-scorer"), requestrecord.PrefixMatch{
+	req.PutAttribute(requestrecord.PrefixPrimaryAttrKey("approx-prefix-cache-producer"), requestrecord.PrefixMatch{
 		HitBlocks: 1, TotalBlocks: 4, BlockSize: 64,
 	})
 	req.PutAttribute(requestrecord.PrefixPerPodAttrKey("precise-prefix-cache-producer"), map[string]requestrecord.PrefixPodMatch{
@@ -67,7 +70,7 @@ func TestBuildRequestRecord_MergesCandidatesPrefixAndTargets(t *testing.T) {
 
 	// Both producers recorded, keyed by producer name, without collision.
 	assert.Len(t, rec.Prefix, 2)
-	approx := rec.Prefix["approx-prefix-scorer"]
+	approx := rec.Prefix["approx-prefix-cache-producer"]
 	assert.Equal(t, 1, approx.PerPod["default/pod1"].MatchBlocks)
 	assert.Equal(t, 4, approx.PerPod["default/pod2"].MatchBlocks)
 	// A candidate with no predicted match is absent (zero value on lookup).
