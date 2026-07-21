@@ -1,0 +1,18 @@
+# Sample EPP configuration for running without P/D that pins each program
+# (request FairnessID) to a single endpoint via the program-aware scorer.
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: program-aware-scorer
+  parameters:
+    missThreshold: 3
+- type: decode-filter
+- type: max-score-picker
+- type: single-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: max-score-picker
+  - pluginRef: program-aware-scorer
+    weight: 1

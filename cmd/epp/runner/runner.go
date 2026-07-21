@@ -121,6 +121,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/nohitlru"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/preciseprefixcache"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
+	programawarescorer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/programaware"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/queuedepth"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/runningrequests"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/sessionaffinity"
@@ -592,6 +593,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(tokenload.TokenLoadScorerType, tokenload.TokenLoadScorerFactory)
 	fwkplugin.Register(nohitlru.NoHitLRUType, nohitlru.Factory)
 	fwkplugin.Register(activerequest.ActiveRequestType, activerequest.Factory)
+	fwkplugin.Register(programawarescorer.ProgramAwareType, programawarescorer.Factory)
 	fwkplugin.Register(preciseprefixcache.PrecisePrefixCachePluginType, preciseprefixcache.PluginFactory)
 	fwkplugin.Register(burstprefix.PluginType, burstprefix.Factory)
 	fwkplugin.Register(mmcacheaffinity.Type, mmcacheaffinity.Factory)
